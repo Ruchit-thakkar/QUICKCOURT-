@@ -209,6 +209,65 @@ export type SportCategory =
   | "gym_fitness"
   | "other";
 
+export interface VenueCourt {
+  courtId: string;
+  name: string;
+  sportId: string;       // matches category id, e.g. "box_cricket"
+  sportName: string;     // e.g. "Box Cricket"
+  pricePerHour: number;  // e.g. 800
+  slotDurationMinutes?: 30 | 60; // 30 mins (1/2 h) or 60 mins (1 h)
+  active?: boolean;
+}
+
+export type BookingStatus = "pending" | "confirmed" | "completed" | "cancelled";
+export type PaymentStatus = "pending" | "paid" | "partially_paid" | "refunded" | "failed";
+
+export interface OwnerBooking {
+  bookingId: string;
+  businessId: string;
+  ownerId: string;
+  customer: {
+    userId?: string;
+    name: string;
+    phone: string;
+    email?: string;
+  };
+  sport: {
+    id: string;
+    name: string;
+  };
+  court: {
+    courtId: string;
+    name: string;
+  };
+  gameDate: string; // YYYY-MM-DD
+  startTime: string; // HH:mm (24-hour)
+  endTime: string;   // HH:mm (24-hour)
+  startAt?: any;     // Firestore Timestamp or ISO string
+  endAt?: any;
+  durationMinutes?: number;
+  playerCount: number;
+  pricing: {
+    subtotal: number;
+    discount?: number;
+    total: number;
+    currency: string;
+  };
+  bookingStatus: BookingStatus;
+  payment: {
+    status: PaymentStatus;
+    method?: "online" | "cash" | "upi" | "card" | "offline";
+    paidAt?: any;
+  };
+  cancellation?: {
+    reason: string;
+    cancelledAt?: any;
+    cancelledBy?: string;
+  };
+  createdAt?: any;
+  updatedAt?: any;
+}
+
 export interface BusinessProfile {
   businessId: string;
   ownerId: string;
@@ -222,6 +281,8 @@ export interface BusinessProfile {
   logoUrl?: string;
   coverImageUrl?: string;
   categories: string[];
+  courts?: VenueCourt[];
+  slotDurationMinutes?: 30 | 60; // default 30 (1/2 h) or 60 (1 h)
   location: {
     pinCode: string;
     address?: string;

@@ -69,6 +69,8 @@ export async function getBusinessProfileByOwnerId(
         closedMessage:
           data.closedMessage ||
           "We are currently closed. Please check our business hours and visit us later.",
+        courts: Array.isArray(data.courts) ? data.courts : [],
+        slotDurationMinutes: data.slotDurationMinutes === 30 ? 30 : 60,
         onboardingCompleted: Boolean(data.onboardingCompleted),
         createdAt: data.createdAt,
         updatedAt: data.updatedAt,
@@ -107,6 +109,8 @@ export async function saveBusinessProfile(
     logoUrl: profileData.logoUrl || "",
     coverImageUrl: profileData.coverImageUrl || "",
     categories: profileData.categories || [],
+    courts: profileData.courts || existing?.courts || [],
+    slotDurationMinutes: profileData.slotDurationMinutes || existing?.slotDurationMinutes || 60,
     location: {
       pinCode: String(profileData.location?.pinCode || "").trim(),
       address: profileData.location?.address?.trim() || "",
