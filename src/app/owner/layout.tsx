@@ -1,4 +1,10 @@
-import { OwnerSidebar } from "@/components/owner/OwnerSidebar";
+import { AuthProvider } from "@/context/AuthContext";
+import { OwnerLayoutWrapper } from "@/components/owner/OwnerLayoutWrapper";
+
+export const metadata = {
+  title: "Owner Portal · QuickCourt",
+  description: "Manage facilities, courts, bookings, and revenue intelligence.",
+};
 
 export default function OwnerLayout({
   children,
@@ -6,14 +12,8 @@ export default function OwnerLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-h-screen bg-qc-black">
-      <OwnerSidebar />
-      <div className="flex-1 overflow-x-hidden">
-        <div className="border-b border-white/8 px-4 py-4 lg:hidden">
-          <p className="font-display text-xl">QuickCourt Owner</p>
-        </div>
-        <div className="px-4 py-6 md:px-8 md:py-8">{children}</div>
-      </div>
-    </div>
+    <AuthProvider>
+      <OwnerLayoutWrapper>{children}</OwnerLayoutWrapper>
+    </AuthProvider>
   );
 }

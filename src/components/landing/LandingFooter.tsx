@@ -15,7 +15,7 @@ export function LandingFooter() {
         </div>
         <div className="flex flex-wrap gap-3">
           <Button href="/player">Find a game</Button>
-          <Button href="/owner" variant="secondary">
+          <Button href="/owner/login" variant="secondary">
             Facility login
           </Button>
           <Button href="/admin" variant="ghost">

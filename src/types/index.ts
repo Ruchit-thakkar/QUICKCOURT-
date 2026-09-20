@@ -180,3 +180,73 @@ export interface DemandPoolInput {
 }
 
 export type AsyncState = "idle" | "loading" | "error" | "empty" | "success";
+
+export interface OwnerUser {
+  uid: string;
+  name: string;
+  email: string;
+  photoURL?: string;
+  role: "owner" | "player" | "admin";
+  authProvider: "password" | "google";
+  createdAt?: any;
+  updatedAt?: any;
+}
+
+export type SportCategory =
+  | "cricket"
+  | "football"
+  | "futsal"
+  | "basketball"
+  | "tennis"
+  | "badminton"
+  | "volleyball"
+  | "table_tennis"
+  | "box_cricket"
+  | "pickleball"
+  | "hockey"
+  | "swimming"
+  | "kabaddi"
+  | "gym_fitness"
+  | "other";
+
+export interface BusinessProfile {
+  businessId: string;
+  ownerId: string;
+  businessName: string;
+  owner: {
+    name: string;
+    phone: string;
+    email: string;
+  };
+  description?: string;
+  logoUrl?: string;
+  coverImageUrl?: string;
+  categories: string[];
+  location: {
+    pinCode: string;
+    address?: string;
+    city?: string;
+    state?: string;
+    country: string;
+  };
+  contact?: {
+    phone?: string;
+    whatsapp?: string;
+    email?: string;
+  };
+  social?: {
+    instagram?: string;
+    website?: string;
+  };
+  businessHours?: {
+    startTime: string; // HH:mm format, e.g. "08:00"
+    endTime: string;   // HH:mm format, e.g. "22:00"
+  };
+  businessStatus?: "open" | "closed";
+  closedReason?: string;
+  closedMessage?: string;
+  onboardingCompleted: boolean;
+  createdAt?: any;
+  updatedAt?: any;
+}
+
