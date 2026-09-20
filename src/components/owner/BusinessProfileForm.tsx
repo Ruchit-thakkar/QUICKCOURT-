@@ -23,8 +23,10 @@ import {
   Globe,
   MessageSquare,
   Clock,
+  Plus,
+  Trash2,
 } from "lucide-react";
-import type { BusinessProfile } from "@/types";
+import type { BusinessProfile, VenueCourt } from "@/types";
 
 export interface SportOption {
   id: string;
@@ -116,6 +118,22 @@ export function BusinessProfileForm({
       "We are currently closed. Please check our business hours and visit us later."
   );
 
+  // Courts / Grounds & Slot Duration
+  const [courts, setCourts] = useState<VenueCourt[]>(
+    Array.isArray(initialData?.courts) && initialData.courts.length > 0
+      ? initialData.courts
+      : []
+  );
+  const [slotDurationMinutes, setSlotDurationMinutes] = useState<30 | 60>(
+    initialData?.slotDurationMinutes === 30 ? 30 : 60
+  );
+
+  // New Court input draft state
+  const [newCourtName, setNewCourtName] = useState("");
+  const [newCourtSportId, setNewCourtSportId] = useState("");
+  const [newCourtPrice, setNewCourtPrice] = useState("800");
+  const [courtError, setCourtError] = useState<string | null>(null);
+
   // Submission & Validation States
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [globalError, setGlobalError] = useState<string | null>(null);
@@ -146,6 +164,12 @@ export function BusinessProfileForm({
       }
       if (initialData.closedMessage) {
         setClosedMessage(initialData.closedMessage);
+      }
+      if (Array.isArray(initialData.courts)) {
+        setCourts(initialData.courts);
+      }
+      if (initialData.slotDurationMinutes) {
+        setSlotDurationMinutes(initialData.slotDurationMinutes);
       }
     }
   }, [initialData]);
@@ -227,6 +251,34 @@ export function BusinessProfileForm({
       }
       return updated;
     });
+  };
+
+  const handleAddCourt = () => {
+    setCourtError(null);
+    if (!newCourtName.trim()) {
+      setCourtError("Please enter a Court / Ground name (e.g. Pitch A, Court 1).");
+      return;
+    }
+    const sportIdToUse = newCourtSportId || selectedCategories[0] || "cricket";
+    const foundSport = ALL_SPORTS_CATEGORIES.find((s) => s.id === sportIdToUse);
+    const sportName = foundSport ? foundSport.name : sportIdToUse;
+
+    const newCourt: VenueCourt = {
+      courtId: `court_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: newCourtName.trim(),
+      sportId: sportIdToUse,
+      sportName,
+      pricePerHour: Number(newCourtPrice) || 800,
+      slotDurationMinutes,
+      active: true,
+    };
+
+    setCourts((prev) => [...prev, newCourt]);
+    setNewCourtName("");
+  };
+
+  const handleRemoveCourt = (courtId: string) => {
+    setCourts((prev) => prev.filter((c) => c.courtId !== courtId));
   };
 
   // Image Upload Handlers
@@ -339,6 +391,8 @@ export function BusinessProfileForm({
           startTime: startTime.trim(),
           endTime: endTime.trim(),
         },
+        courts: courts,
+        slotDurationMinutes: slotDurationMinutes,
         closedMessage: closedMessage.trim() || "We are currently closed. Please check our business hours and visit us later.",
       };
 
@@ -917,6 +971,172 @@ export function BusinessProfileForm({
                     Standard evening end time (e.g. 10:00 PM)
                   </p>
                 </div>
+              </div>
+            </div>
+
+            {/* Courts / Grounds & Slot Duration Configuration */}
+            <div className="pt-6 border-t border-white/8 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>
+                  <h3 className="font-display text-lg text-qc-white">
+                    Courts & Grounds Management
+                  </h3>
+                  <p className="text-xs text-qc-muted">
+                    Add specific courts, pitches, or grounds for player bookings and schedule slots.
+                  </p>
+                </div>
+
+                {/* Slot Duration Preference */}
+                <div className="flex items-center gap-2 border border-white/10 bg-qc-panel px-3 py-1.5">
+                  <span className="text-[10px] uppercase tracking-wider text-qc-muted">Slot Duration:</span>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setSlotDurationMinutes(30)}
+                      className={`px-2.5 py-1 text-xs font-mono transition ${
+                        slotDurationMinutes === 30
+                          ? "bg-qc-lime text-qc-black font-semibold"
+                          : "text-white/60 hover:text-white"
+                      }`}
+                    >
+                      30 min (1/2 h)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSlotDurationMinutes(60)}
+                      className={`px-2.5 py-1 text-xs font-mono transition ${
+                        slotDurationMinutes === 60
+                          ? "bg-qc-lime text-qc-black font-semibold"
+                          : "text-white/60 hover:text-white"
+                      }`}
+                    >
+                      60 min (1 h)
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Add New Court Bar */}
+              <div className="border border-white/10 bg-qc-panel/60 p-4 space-y-3">
+                <span className="text-[10px] uppercase tracking-[0.16em] text-qc-lime font-medium">
+                  + Add Court / Ground
+                </span>
+                <div className="grid gap-3 sm:grid-cols-4">
+                  {/* Court Name */}
+                  <div className="sm:col-span-2">
+                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
+                      Court / Ground Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={newCourtName}
+                      onChange={(e) => {
+                        setNewCourtName(e.target.value);
+                        if (courtError) setCourtError(null);
+                      }}
+                      placeholder="e.g. Main Turf A, Court 1"
+                      className="mt-1 w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Sport selection (restricted to owner's selected categories) */}
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
+                      Sport *
+                    </label>
+                    <select
+                      value={newCourtSportId || (selectedCategories[0] || "cricket")}
+                      onChange={(e) => setNewCourtSportId(e.target.value)}
+                      className="mt-1 w-full border border-white/15 bg-qc-panel px-2.5 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                    >
+                      {selectedCategories.length === 0 ? (
+                        <option value="cricket">Cricket (Select sports in Step 2)</option>
+                      ) : (
+                        selectedCategories.map((catId) => {
+                          const s = ALL_SPORTS_CATEGORIES.find((item) => item.id === catId);
+                          return (
+                            <option key={catId} value={catId} className="bg-qc-panel text-white">
+                              {s ? `${s.emoji} ${s.name}` : catId}
+                            </option>
+                          );
+                        })
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Price per hour */}
+                  <div>
+                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
+                      Price / Hour (₹)
+                    </label>
+                    <div className="mt-1 flex items-center gap-2">
+                      <input
+                        type="number"
+                        min="0"
+                        step="50"
+                        value={newCourtPrice}
+                        onChange={(e) => setNewCourtPrice(e.target.value)}
+                        placeholder="800"
+                        className="w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={handleAddCourt}
+                        className="shrink-0 gap-1"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Add</span>
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {courtError && (
+                  <p className="text-xs text-red-400">{courtError}</p>
+                )}
+              </div>
+
+              {/* Courts List */}
+              <div className="space-y-2">
+                {courts.length === 0 ? (
+                  <div className="border border-dashed border-white/15 bg-qc-panel/30 p-4 text-center">
+                    <p className="text-xs text-qc-muted">
+                      No specific courts configured yet. You can add Court / Ground names above (e.g. &ldquo;Pitch 1&rdquo;, &ldquo;Court A&rdquo;) to manage bookings individually.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {courts.map((court, index) => (
+                      <div
+                        key={court.courtId || index}
+                        className="flex items-center justify-between border border-white/10 bg-qc-panel px-3.5 py-2.5"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-xs text-qc-white truncate">
+                              {court.name}
+                            </span>
+                            <span className="border border-qc-lime/30 bg-qc-lime/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-qc-lime">
+                              {court.sportName}
+                            </span>
+                          </div>
+                          <p className="mt-0.5 font-mono text-[11px] text-qc-muted">
+                            ₹{court.pricePerHour}/hr · {slotDurationMinutes === 30 ? "30 min" : "1 hr"} slots
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCourt(court.courtId)}
+                          className="ml-2 text-white/40 hover:text-red-400 transition p-1"
+                          title="Remove court"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 

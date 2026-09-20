@@ -20,17 +20,25 @@ import type { OwnerBooking, BookingStatus, PaymentStatus } from "@/types";
 export function subscribeToIncomingBookings(
   businessId: string,
   onUpdate: (bookings: OwnerBooking[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  ownerId?: string
 ): () => void {
-  if (!businessId) {
+  const currentUid = ownerId || firebaseAuth.currentUser?.uid;
+  if (!businessId && !currentUid) {
     onUpdate([]);
     return () => {};
   }
 
-  const q = query(
-    collection(db, "bookings"),
-    where("businessId", "==", businessId)
-  );
+  // Use ownerId in query if available to ensure rule matching for owners
+  const q = currentUid
+    ? query(
+        collection(db, "bookings"),
+        where("ownerId", "==", currentUid)
+      )
+    : query(
+        collection(db, "bookings"),
+        where("businessId", "==", businessId)
+      );
 
   const unsubscribe = onSnapshot(
     q,
@@ -112,16 +120,24 @@ export function subscribeToIncomingBookings(
  */
 export async function getExistingBookingsForDate(
   businessId: string,
-  gameDate: string
+  gameDate: string,
+  ownerId?: string
 ): Promise<OwnerBooking[]> {
-  if (!businessId || !gameDate) return [];
+  const currentUid = ownerId || firebaseAuth.currentUser?.uid;
+  if (!gameDate) return [];
 
   try {
-    const q = query(
-      collection(db, "bookings"),
-      where("businessId", "==", businessId),
-      where("gameDate", "==", gameDate)
-    );
+    const q = currentUid
+      ? query(
+          collection(db, "bookings"),
+          where("ownerId", "==", currentUid),
+          where("gameDate", "==", gameDate)
+        )
+      : query(
+          collection(db, "bookings"),
+          where("businessId", "==", businessId),
+          where("gameDate", "==", gameDate)
+        );
 
     const snapshot = await getDocs(q);
     const bookings: OwnerBooking[] = [];

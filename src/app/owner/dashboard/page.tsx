@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/Button";
@@ -26,6 +26,9 @@ import {
   Loader2,
 } from "lucide-react";
 import { updateBusinessStatus } from "@/services/businessService";
+import { subscribeToIncomingBookings } from "@/services/bookingService";
+import { formatINR } from "@/lib/format";
+import type { OwnerBooking } from "@/types";
 
 const COMMON_CLOSE_REASONS = [
   "Closed for today",
@@ -42,12 +45,58 @@ export default function OwnerDashboardPage() {
   const { user, ownerProfile, businessProfile, refreshBusinessProfile } = useAuth();
   const [showBookingModal, setShowBookingModal] = useState(false);
 
+  // Live Bookings State
+  const [bookings, setBookings] = useState<OwnerBooking[]>([]);
+
   // Business Status & Close Modal States
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [selectedReasonOption, setSelectedReasonOption] = useState("Maintenance");
   const [customReasonText, setCustomReasonText] = useState("");
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
+
+  // Subscribe to real bookings for this business
+  useEffect(() => {
+    if (!businessProfile?.businessId) return;
+    const unsubscribe = subscribeToIncomingBookings(
+      businessProfile.businessId,
+      (data) => {
+        setBookings(data);
+      },
+      undefined,
+      user?.uid
+    );
+    return () => unsubscribe();
+  }, [businessProfile?.businessId, user?.uid]);
+
+  // Today's metrics calculation
+  const todayStr = useMemo(() => new Date().toISOString().split("T")[0], []);
+
+  const todayBookings = useMemo(() => {
+    return bookings.filter(
+      (b) => b.gameDate === todayStr && b.bookingStatus !== "cancelled"
+    );
+  }, [bookings, todayStr]);
+
+  const todayRevenue = useMemo(() => {
+    return todayBookings.reduce((sum, b) => sum + (b.pricing?.total || 0), 0);
+  }, [todayBookings]);
+
+  const todayCustomersCount = useMemo(() => {
+    return todayBookings.reduce((sum, b) => sum + (b.playerCount || 1), 0);
+  }, [todayBookings]);
+
+  const activeCourtsCount = useMemo(() => {
+    return businessProfile?.courts?.length || 1;
+  }, [businessProfile?.courts]);
+
+  // Next upcoming game
+  const nextGame = useMemo(() => {
+    const upcoming = bookings.filter(
+      (b) => b.bookingStatus !== "cancelled" && b.gameDate >= todayStr
+    );
+    return upcoming.length > 0 ? upcoming[0] : null;
+  }, [bookings, todayStr]);
 
   const ownerName =
     businessProfile?.owner?.name ||
@@ -355,27 +404,27 @@ export default function OwnerDashboardPage() {
           <OverviewCard
             icon={Ticket}
             label="Bookings"
-            value="0"
-            subtext="No bookings scheduled today"
+            value={String(todayBookings.length)}
+            subtext={todayBookings.length === 1 ? "1 game scheduled today" : `${todayBookings.length} games scheduled today`}
           />
           <OverviewCard
             icon={IndianRupee}
             label="Revenue"
-            value="₹0"
-            subtext="₹0 collected today"
+            value={formatINR(todayRevenue)}
+            subtext={`${formatINR(todayRevenue)} collected today`}
             accent
           />
           <OverviewCard
             icon={Users}
             label="Customers"
-            value="0"
-            subtext="No active player check-ins"
+            value={String(todayCustomersCount)}
+            subtext={`${todayCustomersCount} player check-ins`}
           />
           <OverviewCard
             icon={Grid3X3}
             label="Available Courts"
-            value="0"
-            subtext="Ready for court slot listing"
+            value={String(activeCourtsCount)}
+            subtext="Configured in business profile"
           />
         </div>
       </section>
@@ -386,9 +435,9 @@ export default function OwnerDashboardPage() {
         <div className="mt-4 grid gap-4 sm:grid-cols-3">
           <QuickActionCard
             title="Create Booking"
-            description="Manually schedule a phone, offline, or walk-in booking for players."
+            description="Open interactive slot calendar to schedule court reservations."
             icon={PlusCircle}
-            onClick={() => setShowBookingModal(true)}
+            href="/owner/bookings"
             actionLabel="Schedule slot"
           />
           <QuickActionCard
@@ -414,22 +463,58 @@ export default function OwnerDashboardPage() {
         <section className="border border-white/10 bg-qc-charcoal/80 p-6">
           <div className="flex items-center justify-between border-b border-white/8 pb-4">
             <h3 className="font-display text-2xl text-qc-white">Recent Activity</h3>
-            <span className="text-[10px] uppercase tracking-[0.16em] text-qc-muted">
-              Live Stream
-            </span>
+            <Link
+              href="/owner/bookings"
+              className="text-[10px] uppercase tracking-[0.16em] text-qc-lime hover:underline"
+            >
+              View All ({bookings.length})
+            </Link>
           </div>
 
-          <div className="flex min-h-[220px] flex-col items-center justify-center py-10 text-center">
-            <div className="flex h-12 w-12 items-center justify-center border border-white/10 bg-qc-panel text-white/40">
-              <Inbox className="h-6 w-6" />
+          {bookings.length === 0 ? (
+            <div className="flex min-h-[220px] flex-col items-center justify-center py-10 text-center">
+              <div className="flex h-12 w-12 items-center justify-center border border-white/10 bg-qc-panel text-white/40">
+                <Inbox className="h-6 w-6" />
+              </div>
+              <p className="mt-4 font-display text-xl text-qc-white">
+                No activity yet
+              </p>
+              <p className="mt-1.5 max-w-sm text-xs text-qc-muted leading-relaxed">
+                When players book courts or join games at your facility, incoming activities and slot confirmations will appear here in real-time.
+              </p>
             </div>
-            <p className="mt-4 font-display text-xl text-qc-white">
-              No activity yet
-            </p>
-            <p className="mt-1.5 max-w-sm text-xs text-qc-muted leading-relaxed">
-              When players book courts or join games at your facility, incoming activities and slot confirmations will appear here in real-time.
-            </p>
-          </div>
+          ) : (
+            <div className="mt-4 space-y-2.5">
+              {bookings.slice(0, 4).map((b) => (
+                <div
+                  key={b.bookingId}
+                  className="flex items-center justify-between border border-white/8 bg-qc-panel/60 p-3"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-xs text-qc-white capitalize">
+                        {b.sport?.name}
+                      </span>
+                      <span className="text-[10px] text-qc-muted">
+                        · {b.court?.name}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] font-mono text-qc-lime">
+                      {b.gameDate} · {b.startTime} - {b.endTime}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="font-display text-sm text-qc-white">
+                      {formatINR(b.pricing?.total || 0)}
+                    </p>
+                    <span className="text-[9px] uppercase tracking-wider text-qc-muted">
+                      {b.customer?.name}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* Venue Setup Progress */}
