@@ -121,10 +121,10 @@ export function SportTransition({
                 Find the players. Find the court. Make the game happen.
               </p>
               <div className="mt-10 flex flex-wrap gap-3">
-                <Button href="/player" size="lg">
-                  Find my game
+                <Button href="#booking" size="lg">
+                  Book a Court
                 </Button>
-                <Button href="/for-facilities" variant="secondary" size="lg">
+                <Button href="/owner/signup" variant="secondary" size="lg">
                   List your facility
                 </Button>
               </div>

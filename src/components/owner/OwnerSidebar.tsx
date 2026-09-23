@@ -6,7 +6,9 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Ticket,
+  BarChart3,
   Users,
+  Grid3X3,
   Boxes,
   UserCog,
   Building2,
@@ -16,6 +18,7 @@ import {
   X,
   Loader2,
   ExternalLink,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useAuth } from "@/context/AuthContext";
@@ -31,11 +34,14 @@ interface NavItem {
 const navItems: NavItem[] = [
   { href: "/owner/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/owner/bookings", label: "Bookings", icon: Ticket },
+  { href: "/owner/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/owner/ai", label: "AI Assistant", icon: Sparkles, badge: "AI" },
   { href: "/owner/customers", label: "Customers", icon: Users },
-  { href: "/owner/inventory", label: "Inventory", icon: Boxes, badge: "Phase 2" },
-  { href: "/owner/staff", label: "Staff", icon: UserCog, badge: "Phase 2" },
+  { href: "/owner/courts", label: "Courts & Pricing", icon: Grid3X3 },
   { href: "/owner/business-profile", label: "Business Profile", icon: Building2 },
-  { href: "/owner/settings", label: "Settings", icon: Settings, badge: "Phase 2" },
+  { href: "/owner/inventory", label: "Inventory", icon: Boxes },
+  { href: "/owner/staff", label: "Staff", icon: UserCog },
+  { href: "/owner/settings", label: "Settings", icon: Settings },
 ];
 
 export function OwnerSidebar() {
@@ -72,7 +78,7 @@ export function OwnerSidebar() {
             </p>
           </div>
           <span className="border border-qc-lime/30 bg-qc-lime/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.14em] text-qc-lime">
-            Phase 1
+            Phase 2
           </span>
         </div>
 

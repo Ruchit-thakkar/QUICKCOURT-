@@ -14,20 +14,18 @@ export function LandingFooter() {
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <Button href="/player">Find a game</Button>
+          <Button href="/owner/signup">List your facility</Button>
           <Button href="/owner/login" variant="secondary">
             Facility login
-          </Button>
-          <Button href="/admin" variant="ghost">
-            Admin
           </Button>
         </div>
       </div>
       <div className="mx-auto mt-12 flex max-w-6xl flex-wrap gap-6 text-[11px] uppercase tracking-[0.16em] text-white/35">
-        <Link href="/for-players">Players</Link>
-        <Link href="/for-facilities">Facilities</Link>
-        <Link href="/pricing">Pricing</Link>
-        <span>Demo facilities are fictional</span>
+        <Link href="#film">Film</Link>
+        <Link href="#demand">Demand</Link>
+        <Link href="#booking">Booking</Link>
+        <Link href="/owner/login">Facility Portal</Link>
+        <span>QuickCourt • Sports Venue Management</span>
       </div>
     </footer>
   );

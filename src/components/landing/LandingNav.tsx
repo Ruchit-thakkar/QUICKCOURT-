@@ -7,9 +7,10 @@ import { cn } from "@/lib/cn";
 import { Menu, X, Shield } from "lucide-react";
 
 const links = [
-  { href: "/for-players", label: "For Players" },
-  { href: "/for-facilities", label: "For Facilities" },
-  { href: "/pricing", label: "Pricing" },
+  { href: "/player", label: "Find Courts" },
+  { href: "#film", label: "Film" },
+  { href: "#demand", label: "Demand" },
+  { href: "#booking", label: "Booking" },
   { href: "/owner/login", label: "Facility Portal" },
 ];
 
@@ -68,15 +69,15 @@ export function LandingNav() {
           <Button href="/owner/login" variant="ghost" size="sm" className="text-xs">
             Facility Login
           </Button>
-          <Button href="/player" size="sm">
-            Find a game
+          <Button href="/owner/signup" size="sm">
+            List Facility
           </Button>
         </div>
 
         {/* Mobile controls */}
         <div className="flex items-center gap-2 sm:hidden">
-          <Button href="/player" size="sm" className="h-8 px-3 text-[10px]">
-            Play
+          <Button href="/owner/login" size="sm" className="h-8 px-3 text-[10px]">
+            Portal
           </Button>
           <button
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
@@ -112,11 +113,11 @@ export function LandingNav() {
                 Owner / Facility Login
               </Button>
               <Button
-                href="/player"
+                href="/owner/signup"
                 size="sm"
                 className="w-full justify-center"
               >
-                Find a Game
+                List Facility
               </Button>
             </div>
           </div>

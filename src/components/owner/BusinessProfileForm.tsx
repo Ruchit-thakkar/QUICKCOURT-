@@ -3,7 +3,13 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
-import { saveBusinessProfile, uploadBusinessImage } from "@/services/businessService";
+import {
+  saveBusinessProfile,
+  uploadMediaFileViaApi,
+  deleteMediaFileViaApi,
+} from "@/services/businessService";
+import { validateImageFile, validateImageBatch } from "@/lib/imageValidation";
+import { getImageKitUrl, IMAGE_PRESETS } from "@/lib/imagekit";
 import { Button } from "@/components/ui/Button";
 import {
   Building2,
@@ -25,8 +31,13 @@ import {
   Clock,
   Plus,
   Trash2,
+  Star,
+  Image as ImageIcon,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
 } from "lucide-react";
-import type { BusinessProfile, VenueCourt } from "@/types";
+import type { BusinessProfile, VenueCourt, BusinessImageItem } from "@/types";
 
 export interface SportOption {
   id: string;
@@ -82,11 +93,39 @@ export function BusinessProfileForm({
   );
   const [description, setDescription] = useState(initialData?.description || "");
 
-  // Media
-  const [logoUrl, setLogoUrl] = useState(initialData?.logoUrl || "");
-  const [coverImageUrl, setCoverImageUrl] = useState(initialData?.coverImageUrl || "");
+  // Media State
+  const [logo, setLogo] = useState<BusinessImageItem | null>(() => {
+    if (initialData?.media?.logo) return initialData.media.logo;
+    if (initialData?.logoUrl) return { url: initialData.logoUrl, fileId: "" };
+    return null;
+  });
+  const [coverImage, setCoverImage] = useState<BusinessImageItem | null>(() => {
+    if (initialData?.media?.coverImage) return initialData.media.coverImage;
+    if (initialData?.coverImageUrl) return { url: initialData.coverImageUrl, fileId: "" };
+    return null;
+  });
+  const [gallery, setGallery] = useState<BusinessImageItem[]>(() => {
+    if (Array.isArray(initialData?.media?.gallery)) {
+      return initialData.media.gallery.map((g, idx) =>
+        typeof g === "string" ? { url: g, fileId: `legacy_${idx}`, order: idx } : g
+      );
+    }
+    return [];
+  });
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState<
+    Array<{
+      id: string;
+      file: File;
+      previewUrl: string;
+      status: "preparing" | "uploading" | "uploaded" | "failed";
+      error?: string;
+    }>
+  >([]);
+  const [isUploadingGallery, setIsUploadingGallery] = useState(false);
+  const [deleteConfirmPhoto, setDeleteConfirmPhoto] = useState<BusinessImageItem | null>(null);
+  const [deletingPhotoId, setDeletingPhotoId] = useState<string | null>(null);
 
   // Sports Categories (Array of IDs)
   const [selectedCategories, setSelectedCategories] = useState<string[]>(
@@ -148,8 +187,31 @@ export function BusinessProfileForm({
       setPhone(initialData.owner?.phone || "");
       setEmail(initialData.owner?.email || "");
       setDescription(initialData.description || "");
-      setLogoUrl(initialData.logoUrl || "");
-      setCoverImageUrl(initialData.coverImageUrl || "");
+      if (initialData.media?.logo) {
+        setLogo(initialData.media.logo);
+      } else if (initialData.logoUrl) {
+        setLogo({ url: initialData.logoUrl, fileId: "" });
+      } else {
+        setLogo(null);
+      }
+
+      if (initialData.media?.coverImage) {
+        setCoverImage(initialData.media.coverImage);
+      } else if (initialData.coverImageUrl) {
+        setCoverImage({ url: initialData.coverImageUrl, fileId: "" });
+      } else {
+        setCoverImage(null);
+      }
+
+      if (Array.isArray(initialData.media?.gallery)) {
+        setGallery(
+          initialData.media.gallery.map((g, idx) =>
+            typeof g === "string" ? { url: g, fileId: `legacy_${idx}`, order: idx } : g
+          )
+        );
+      } else {
+        setGallery([]);
+      }
       setSelectedCategories(initialData.categories || []);
       setPinCode(initialData.location?.pinCode || "");
       setAddress(initialData.location?.address || "");
@@ -255,20 +317,29 @@ export function BusinessProfileForm({
 
   const handleAddCourt = () => {
     setCourtError(null);
-    if (!newCourtName.trim()) {
+    const trimmedName = newCourtName.trim();
+    if (!trimmedName) {
       setCourtError("Please enter a Court / Ground name (e.g. Pitch A, Court 1).");
       return;
     }
+    const duplicate = courts.some(
+      (c) => c.name.toLowerCase() === trimmedName.toLowerCase()
+    );
+    if (duplicate) {
+      setCourtError(`A court named "${trimmedName}" already exists.`);
+      return;
+    }
+
     const sportIdToUse = newCourtSportId || selectedCategories[0] || "cricket";
     const foundSport = ALL_SPORTS_CATEGORIES.find((s) => s.id === sportIdToUse);
     const sportName = foundSport ? foundSport.name : sportIdToUse;
 
     const newCourt: VenueCourt = {
       courtId: `court_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      name: newCourtName.trim(),
+      name: trimmedName,
       sportId: sportIdToUse,
       sportName,
-      pricePerHour: Number(newCourtPrice) || 800,
+      pricePerHour: Math.max(0, Number(newCourtPrice) || 800),
       slotDurationMinutes,
       active: true,
     };
@@ -281,34 +352,204 @@ export function BusinessProfileForm({
     setCourts((prev) => prev.filter((c) => c.courtId !== courtId));
   };
 
-  // Image Upload Handlers
+  // Image Upload Handlers (ImageKit via authenticated API)
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user) return;
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setGlobalError(validation.error || "Invalid logo image.");
+      return;
+    }
+
     setUploadingLogo(true);
     setGlobalError(null);
     try {
-      const url = await uploadBusinessImage(file, "logos", user.uid);
-      setLogoUrl(url);
+      const bizId = initialData?.businessId || `biz_${user.uid}`;
+      const uploaded = await uploadMediaFileViaApi(file, bizId, "logo");
+      if (logo?.fileId) {
+        deleteMediaFileViaApi(bizId, logo.fileId).catch(() => {});
+      }
+      setLogo(uploaded);
     } catch (err: unknown) {
       setGlobalError(err instanceof Error ? err.message : "Failed to upload logo.");
     } finally {
       setUploadingLogo(false);
+      e.target.value = "";
     }
+  };
+
+  const handleRemoveLogo = async () => {
+    if (!logo) return;
+    const bizId = initialData?.businessId || `biz_${user?.uid}`;
+    if (logo.fileId) {
+      deleteMediaFileViaApi(bizId, logo.fileId).catch(() => {});
+    }
+    setLogo(null);
   };
 
   const handleCoverUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !user) return;
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      setGlobalError(validation.error || "Invalid cover image.");
+      return;
+    }
+
     setUploadingCover(true);
     setGlobalError(null);
     try {
-      const url = await uploadBusinessImage(file, "covers", user.uid);
-      setCoverImageUrl(url);
+      const bizId = initialData?.businessId || `biz_${user.uid}`;
+      const uploaded = await uploadMediaFileViaApi(file, bizId, "cover");
+      if (coverImage?.fileId) {
+        deleteMediaFileViaApi(bizId, coverImage.fileId).catch(() => {});
+      }
+      setCoverImage(uploaded);
     } catch (err: unknown) {
       setGlobalError(err instanceof Error ? err.message : "Failed to upload cover.");
     } finally {
       setUploadingCover(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleRemoveCover = async () => {
+    if (!coverImage) return;
+    const bizId = initialData?.businessId || `biz_${user?.uid}`;
+    if (coverImage.fileId) {
+      deleteMediaFileViaApi(bizId, coverImage.fileId).catch(() => {});
+    }
+    setCoverImage(null);
+  };
+
+  const handleSetAsCover = (item: BusinessImageItem) => {
+    setCoverImage(item);
+  };
+
+  // Multiple Gallery Files Selection
+  const handleSelectGalleryFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(e.target.files || []);
+    if (selected.length === 0) return;
+
+    const validation = validateImageBatch(selected, gallery.length);
+    if (!validation.valid) {
+      setGlobalError(validation.error || "Invalid photos selected.");
+      return;
+    }
+
+    setGlobalError(null);
+    const newItems = selected.map((f) => ({
+      id: `${f.name}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      file: f,
+      previewUrl: URL.createObjectURL(f),
+      status: "preparing" as const,
+    }));
+
+    setUploadQueue((prev) => [...prev, ...newItems]);
+    e.target.value = "";
+  };
+
+  const handleRemoveFromQueue = (queueId: string) => {
+    setUploadQueue((prev) => {
+      const target = prev.find((i) => i.id === queueId);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((i) => i.id !== queueId);
+    });
+  };
+
+  const handleClearQueue = () => {
+    uploadQueue.forEach((i) => URL.revokeObjectURL(i.previewUrl));
+    setUploadQueue([]);
+  };
+
+  const handleUploadQueue = async () => {
+    if (uploadQueue.length === 0 || !user) return;
+    setIsUploadingGallery(true);
+    setGlobalError(null);
+    const bizId = initialData?.businessId || `biz_${user.uid}`;
+    const uploadedList: BusinessImageItem[] = [];
+
+    for (const item of uploadQueue) {
+      if (item.status === "uploaded") continue;
+
+      setUploadQueue((prev) =>
+        prev.map((i) => (i.id === item.id ? { ...i, status: "uploading" } : i))
+      );
+
+      try {
+        const uploaded = await uploadMediaFileViaApi(item.file, bizId, "gallery");
+        uploaded.order = gallery.length + uploadedList.length;
+        uploadedList.push(uploaded);
+
+        setUploadQueue((prev) =>
+          prev.map((i) => (i.id === item.id ? { ...i, status: "uploaded" } : i))
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Upload failed";
+        setUploadQueue((prev) =>
+          prev.map((i) => (i.id === item.id ? { ...i, status: "failed", error: msg } : i))
+        );
+      }
+    }
+
+    if (uploadedList.length > 0) {
+      setGallery((prev) => [...prev, ...uploadedList]);
+      if (!coverImage && uploadedList.length > 0) {
+        setCoverImage(uploadedList[0]);
+      }
+    }
+
+    setIsUploadingGallery(false);
+    setTimeout(() => {
+      setUploadQueue((prev) => prev.filter((i) => i.status !== "uploaded"));
+    }, 1200);
+  };
+
+  const handleMoveGalleryPhoto = (index: number, direction: "left" | "right") => {
+    const target = direction === "left" ? index - 1 : index + 1;
+    if (target < 0 || target >= gallery.length) return;
+
+    setGallery((prev) => {
+      const copy = [...prev];
+      const item = copy[index];
+      copy[index] = copy[target];
+      copy[target] = item;
+      return copy.map((p, idx) => ({ ...p, order: idx }));
+    });
+  };
+
+  const handleConfirmDeletePhoto = async () => {
+    if (!deleteConfirmPhoto || !user) return;
+    const bizId = initialData?.businessId || `biz_${user.uid}`;
+    setDeletingPhotoId(deleteConfirmPhoto.fileId);
+
+    try {
+      if (deleteConfirmPhoto.fileId) {
+        await deleteMediaFileViaApi(bizId, deleteConfirmPhoto.fileId);
+      }
+
+      setGallery((prev) =>
+        prev
+          .filter(
+            (p) =>
+              p.fileId !== deleteConfirmPhoto.fileId &&
+              p.url !== deleteConfirmPhoto.url
+          )
+          .map((p, idx) => ({ ...p, order: idx }))
+      );
+
+      if (coverImage?.url === deleteConfirmPhoto.url) {
+        const remaining = gallery.filter((p) => p.url !== deleteConfirmPhoto.url);
+        setCoverImage(remaining[0] || null);
+      }
+
+      setDeleteConfirmPhoto(null);
+    } catch (err: unknown) {
+      console.error("Delete photo error:", err);
+      setGlobalError(err instanceof Error ? err.message : "Failed to delete photo.");
+    } finally {
+      setDeletingPhotoId(null);
     }
   };
 
@@ -322,30 +563,19 @@ export function BusinessProfileForm({
     const valid1 = validateStep1();
     if (!valid1) {
       setGlobalError("Please complete Step 1: Business name, owner name, valid phone and email are required.");
-      setCurrentStep(1);
-      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
-
-    const valid2 = validateStep2();
-    if (!valid2) {
-      setGlobalError("Please select at least one sports category in Step 2.");
-      setCurrentStep(2);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      return;
-    }
-
     const valid3 = validateStep3();
     if (!valid3) {
-      setGlobalError("Please enter a valid 6-digit PIN code in Step 3.");
-      setCurrentStep(3);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      setGlobalError("Please complete Step 3: PIN Code and street address are required.");
       return;
     }
-
-    // Validate Business Hours
-    if (!startTime || !endTime) {
-      setGlobalError("Please provide both opening and closing times.");
+    if (selectedCategories.length === 0) {
+      setGlobalError("Please select at least one sports category in Step 2.");
+      return;
+    }
+    if (courts.length === 0) {
+      setGlobalError("Please configure at least one court or ground in Step 4.");
       return;
     }
     if (startTime === endTime) {
@@ -368,8 +598,15 @@ export function BusinessProfileForm({
           email: email.trim(),
         },
         description: description.trim(),
-        logoUrl,
-        coverImageUrl,
+        logoUrl: logo?.url || "",
+        coverImageUrl: coverImage?.url || "",
+        media: {
+          logo: logo || undefined,
+          coverImage: coverImage || undefined,
+          gallery: gallery.map((item, idx) => ({ ...item, order: idx })),
+          logoUrl: logo?.url || "",
+          coverImageUrl: coverImage?.url || "",
+        },
         categories: selectedCategories,
         location: {
           pinCode: pinCode.trim(),
@@ -377,6 +614,8 @@ export function BusinessProfileForm({
           city: city.trim(),
           state: state.trim(),
           country: "India",
+          coordinates: initialData?.location?.coordinates,
+          googleMaps: initialData?.location?.googleMaps,
         },
         contact: {
           phone: phone.trim(),
@@ -390,6 +629,7 @@ export function BusinessProfileForm({
         businessHours: {
           startTime: startTime.trim(),
           endTime: endTime.trim(),
+          weeklySchedule: initialData?.businessHours?.weeklySchedule,
         },
         courts: courts,
         slotDurationMinutes: slotDurationMinutes,
@@ -625,92 +865,376 @@ export function BusinessProfileForm({
                 </div>
               </div>
 
-              {/* Media Uploads */}
-              <div>
-                <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted">
-                  Venue Logo (Optional)
-                </label>
-                <div className="mt-2 flex items-center gap-4">
-                  {logoUrl ? (
-                    <div className="relative h-16 w-16 overflow-hidden border border-qc-lime/40 bg-qc-panel">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={logoUrl}
-                        alt="Venue logo"
-                        className="h-full w-full object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setLogoUrl("")}
-                        className="absolute right-0 top-0 bg-red-600/90 p-1 text-white hover:bg-red-700"
-                        title="Remove logo"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="flex h-16 w-16 cursor-pointer flex-col items-center justify-center border border-dashed border-white/20 bg-qc-panel text-white/40 hover:border-qc-lime/50 hover:text-qc-lime transition">
-                      {uploadingLogo ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-qc-lime" />
-                      ) : (
-                        <Upload className="h-4 w-4" />
-                      )}
-                      <span className="mt-1 text-[8px] uppercase">Upload</span>
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/jpg,image/webp"
-                        onChange={handleLogoUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  )}
-                  <p className="text-[11px] text-qc-muted leading-tight">
-                    PNG, JPG or WEBP up to 5MB. Appears on booking cards.
+              {/* Comprehensive Media & Photos Management */}
+              <div className="sm:col-span-2 border-t border-white/8 pt-6 space-y-6">
+                <div>
+                  <h3 className="font-display text-xl text-qc-white flex items-center gap-2">
+                    <ImageIcon className="h-5 w-5 text-qc-lime" />
+                    <span>Business Media & Photos</span>
+                  </h3>
+                  <p className="mt-1 text-xs text-qc-muted">
+                    Manage your business logo, primary cover photo, and gallery pictures powered by ImageKit CDN.
                   </p>
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted">
-                  Cover Photo (Optional)
-                </label>
-                <div className="mt-2 flex items-center gap-4">
-                  {coverImageUrl ? (
-                    <div className="relative h-16 w-28 overflow-hidden border border-qc-lime/40 bg-qc-panel">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={coverImageUrl}
-                        alt="Venue cover"
-                        className="h-full w-full object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setCoverImageUrl("")}
-                        className="absolute right-0 top-0 bg-red-600/90 p-1 text-white hover:bg-red-700"
-                        title="Remove cover"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ) : (
-                    <label className="flex h-16 w-28 cursor-pointer flex-col items-center justify-center border border-dashed border-white/20 bg-qc-panel text-white/40 hover:border-qc-lime/50 hover:text-qc-lime transition">
-                      {uploadingCover ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-qc-lime" />
+                <div className="grid gap-6 sm:grid-cols-2">
+                  {/* 1. Business Logo */}
+                  <div className="border border-white/10 bg-qc-panel/60 p-4">
+                    <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted font-semibold">
+                      Business Logo
+                    </label>
+                    <div className="mt-3 flex items-start gap-4">
+                      {logo?.url ? (
+                        <div className="relative h-20 w-20 shrink-0 border border-qc-lime/50 bg-qc-charcoal overflow-hidden shadow-md">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={getImageKitUrl(logo.url, IMAGE_PRESETS.LOGO)}
+                            alt="Business Logo"
+                            className="h-full w-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleRemoveLogo}
+                            className="absolute right-0 top-0 bg-red-600/90 p-1 text-white hover:bg-red-700 transition"
+                            title="Remove logo"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       ) : (
-                        <Upload className="h-4 w-4" />
+                        <label className="flex h-20 w-20 shrink-0 cursor-pointer flex-col items-center justify-center border border-dashed border-white/20 bg-qc-charcoal text-white/40 hover:border-qc-lime/50 hover:text-qc-lime transition">
+                          {uploadingLogo ? (
+                            <Loader2 className="h-5 w-5 animate-spin text-qc-lime" />
+                          ) : (
+                            <Upload className="h-5 w-5" />
+                          )}
+                          <span className="mt-1 text-[8px] font-bold uppercase">Upload</span>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/jpg,image/webp"
+                            onChange={handleLogoUpload}
+                            disabled={uploadingLogo}
+                            className="hidden"
+                          />
+                        </label>
                       )}
-                      <span className="mt-1 text-[8px] uppercase">Upload</span>
+
+                      <div className="space-y-2">
+                        <p className="text-xs text-white/80">
+                          {logo?.url ? "Logo is uploaded and active." : "Upload your official venue logo."}
+                        </p>
+                        <p className="text-[11px] text-qc-muted leading-tight">
+                          JPG, PNG, or WEBP up to 5MB. Appears as your avatar across player discovery cards and bookings.
+                        </p>
+                        {logo?.url && (
+                          <label className="inline-flex cursor-pointer items-center gap-1.5 border border-white/20 bg-qc-charcoal px-2.5 py-1 text-[11px] font-semibold text-white/80 hover:border-qc-lime/50 hover:text-qc-lime transition">
+                            {uploadingLogo ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-qc-lime" />
+                            ) : (
+                              <Upload className="h-3 w-3" />
+                            )}
+                            <span>Change Logo</span>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/jpg,image/webp"
+                              onChange={handleLogoUpload}
+                              disabled={uploadingLogo}
+                              className="hidden"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2. Cover Image */}
+                  <div className="border border-white/10 bg-qc-panel/60 p-4">
+                    <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted font-semibold">
+                      Cover Photo
+                    </label>
+                    <div className="mt-3 flex items-start gap-4">
+                      {coverImage?.url ? (
+                        <div className="relative h-20 w-32 shrink-0 border border-qc-lime/50 bg-qc-charcoal overflow-hidden shadow-md">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={getImageKitUrl(coverImage.url, IMAGE_PRESETS.CARD)}
+                            alt="Venue Cover"
+                            className="h-full w-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleRemoveCover}
+                            className="absolute right-0 top-0 bg-red-600/90 p-1 text-white hover:bg-red-700 transition"
+                            title="Remove cover"
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <label className="flex h-20 w-32 shrink-0 cursor-pointer flex-col items-center justify-center border border-dashed border-white/20 bg-qc-charcoal text-white/40 hover:border-qc-lime/50 hover:text-qc-lime transition">
+                          {uploadingCover ? (
+                            <Loader2 className="h-5 w-5 animate-spin text-qc-lime" />
+                          ) : (
+                            <Upload className="h-5 w-5" />
+                          )}
+                          <span className="mt-1 text-[8px] font-bold uppercase">Upload Banner</span>
+                          <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/jpg,image/webp"
+                            onChange={handleCoverUpload}
+                            disabled={uploadingCover}
+                            className="hidden"
+                          />
+                        </label>
+                      )}
+
+                      <div className="space-y-2">
+                        <p className="text-xs text-white/80">
+                          {coverImage?.url
+                            ? "Custom cover photo active."
+                            : "Landscape banner photo for your venue hero."}
+                        </p>
+                        <p className="text-[11px] text-qc-muted leading-tight">
+                          If left empty, your first gallery photo is automatically used as the cover banner.
+                        </p>
+                        {coverImage?.url && (
+                          <label className="inline-flex cursor-pointer items-center gap-1.5 border border-white/20 bg-qc-charcoal px-2.5 py-1 text-[11px] font-semibold text-white/80 hover:border-qc-lime/50 hover:text-qc-lime transition">
+                            {uploadingCover ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-qc-lime" />
+                            ) : (
+                              <Upload className="h-3 w-3" />
+                            )}
+                            <span>Change Cover</span>
+                            <input
+                              type="file"
+                              accept="image/png,image/jpeg,image/jpg,image/webp"
+                              onChange={handleCoverUpload}
+                              disabled={uploadingCover}
+                              className="hidden"
+                            />
+                          </label>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Business Gallery Photos */}
+                <div className="border border-white/10 bg-qc-panel/60 p-5 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-white/8 pb-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs uppercase tracking-[0.14em] text-qc-white font-bold">
+                          Business Photos Gallery
+                        </span>
+                        <span className="border border-qc-lime/30 bg-qc-lime/10 px-2 py-0.5 text-[10px] font-bold text-qc-lime font-mono">
+                          {gallery.length} / 30
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-qc-muted">
+                        Photos of your grounds, turfs, lighting, seating, and facilities.
+                      </p>
+                    </div>
+
+                    {/* Multi-Photo Input Trigger */}
+                    <label className="inline-flex cursor-pointer items-center justify-center gap-2 border border-qc-lime bg-qc-lime px-3.5 py-1.5 text-xs font-bold uppercase tracking-wider text-qc-black hover:bg-qc-lime/90 transition shadow-sm">
+                      <Plus className="h-4 w-4" />
+                      <span>Add Photos (1–10)</span>
                       <input
                         type="file"
+                        multiple
                         accept="image/png,image/jpeg,image/jpg,image/webp"
-                        onChange={handleCoverUpload}
+                        onChange={handleSelectGalleryFiles}
+                        disabled={isUploadingGallery}
                         className="hidden"
                       />
                     </label>
+                  </div>
+
+                  {/* PRE-UPLOAD QUEUE SECTION */}
+                  {uploadQueue.length > 0 && (
+                    <div className="border border-qc-lime/30 bg-qc-charcoal/80 p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-qc-lime uppercase tracking-wider">
+                          Ready to Upload ({uploadQueue.length} {uploadQueue.length === 1 ? "photo" : "photos"})
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleClearQueue}
+                            disabled={isUploadingGallery}
+                            className="text-xs text-white/50 hover:text-red-400 transition"
+                          >
+                            Cancel
+                          </button>
+                          <Button
+                            type="button"
+                            onClick={handleUploadQueue}
+                            disabled={isUploadingGallery}
+                            size="sm"
+                            className="gap-1.5"
+                          >
+                            {isUploadingGallery ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                <span>Uploading...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Upload className="h-3.5 w-3.5" />
+                                <span>Upload Now</span>
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-3">
+                        {uploadQueue.map((item) => (
+                          <div
+                            key={item.id}
+                            className="relative border border-white/10 bg-qc-panel p-2 flex flex-col items-center text-center group"
+                          >
+                            <div className="relative aspect-square w-full overflow-hidden bg-black/40 mb-1.5">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={item.previewUrl}
+                                alt={item.file.name}
+                                className="h-full w-full object-cover"
+                              />
+                              {item.status === "uploading" && (
+                                <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                                  <Loader2 className="h-5 w-5 animate-spin text-qc-lime" />
+                                </div>
+                              )}
+                              {item.status === "uploaded" && (
+                                <div className="absolute inset-0 bg-emerald-950/80 flex items-center justify-center">
+                                  <Check className="h-6 w-6 text-emerald-400 font-bold" />
+                                </div>
+                              )}
+                              {item.status === "failed" && (
+                                <div className="absolute inset-0 bg-red-950/80 flex flex-col items-center justify-center p-1">
+                                  <AlertCircle className="h-5 w-5 text-red-400 mb-0.5" />
+                                  <span className="text-[9px] text-red-300 line-clamp-1">{item.error || "Failed"}</span>
+                                </div>
+                              )}
+                            </div>
+
+                            <span className="truncate w-full text-[10px] text-white/80 font-mono">
+                              {item.file.name}
+                            </span>
+                            <span className="text-[9px] text-qc-muted">
+                              {(item.file.size / (1024 * 1024)).toFixed(1)} MB
+                            </span>
+
+                            {item.status === "preparing" && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveFromQueue(item.id)}
+                                className="absolute -top-1 -right-1 bg-red-600 text-white rounded-full p-0.5 shadow hover:bg-red-700"
+                                title="Remove from queue"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
-                  <p className="text-[11px] text-qc-muted leading-tight">
-                    Landscape banner image for your arena profile.
-                  </p>
+
+                  {/* UPLOADED PHOTOS GRID */}
+                  {gallery.length === 0 ? (
+                    <div className="border border-dashed border-white/10 bg-qc-charcoal/40 p-8 text-center">
+                      <ImageIcon className="mx-auto h-8 w-8 text-white/20 mb-2" />
+                      <p className="text-xs font-semibold text-white/70">No photos uploaded yet</p>
+                      <p className="mt-1 text-[11px] text-white/40 max-w-sm mx-auto">
+                        Add photos of your playing surfaces, lighting, changing rooms, and amenities to attract more player bookings.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                      {gallery.map((photo, index) => {
+                        const isCover = coverImage?.url === photo.url;
+                        return (
+                          <div
+                            key={photo.fileId || photo.url}
+                            className="group relative border border-white/10 bg-qc-charcoal overflow-hidden hover:border-qc-lime/40 transition"
+                          >
+                            <div className="relative aspect-[4/3] w-full overflow-hidden bg-black/40">
+                              {/* eslint-disable-next-line @next/next/no-img-element */}
+                              <img
+                                src={getImageKitUrl(photo.url, IMAGE_PRESETS.THUMB)}
+                                alt={`Venue photo ${index + 1}`}
+                                className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                              />
+
+                              {/* Badges */}
+                              <div className="absolute top-1.5 left-1.5 flex flex-col gap-1 z-10">
+                                <span className="bg-black/80 px-1.5 py-0.5 text-[9px] font-mono text-white/70">
+                                  #{index + 1}
+                                </span>
+                                {isCover && (
+                                  <span className="inline-flex items-center gap-1 border border-qc-lime/50 bg-qc-black/90 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-qc-lime">
+                                    <Star className="h-2.5 w-2.5 fill-qc-lime text-qc-lime" />
+                                    <span>Cover</span>
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Action Overlay */}
+                              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-between p-2">
+                                <div className="flex justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() => setDeleteConfirmPhoto(photo)}
+                                    className="bg-red-600/90 p-1 text-white hover:bg-red-700 transition"
+                                    title="Delete photo"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center justify-between gap-1">
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={index === 0}
+                                      onClick={() => handleMoveGalleryPhoto(index, "left")}
+                                      className="border border-white/20 bg-black/80 p-1 text-white hover:border-qc-lime hover:text-qc-lime disabled:opacity-30 disabled:hover:border-white/20 disabled:hover:text-white"
+                                      title="Move Left"
+                                    >
+                                      <ChevronLeft className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={index === gallery.length - 1}
+                                      onClick={() => handleMoveGalleryPhoto(index, "right")}
+                                      className="border border-white/20 bg-black/80 p-1 text-white hover:border-qc-lime hover:text-qc-lime disabled:opacity-30 disabled:hover:border-white/20 disabled:hover:text-white"
+                                      title="Move Right"
+                                    >
+                                      <ChevronRight className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+
+                                  {!isCover && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSetAsCover(photo)}
+                                      className="border border-white/20 bg-black/80 px-2 py-1 text-[10px] font-semibold text-white/90 hover:border-qc-lime hover:text-qc-lime"
+                                      title="Set as venue cover"
+                                    >
+                                      Set Cover
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -992,7 +1516,10 @@ export function BusinessProfileForm({
                   <div className="flex gap-1">
                     <button
                       type="button"
-                      onClick={() => setSlotDurationMinutes(30)}
+                      onClick={() => {
+                        setSlotDurationMinutes(30);
+                        setCourts((prev) => prev.map((c) => ({ ...c, slotDurationMinutes: 30 })));
+                      }}
                       className={`px-2.5 py-1 text-xs font-mono transition ${
                         slotDurationMinutes === 30
                           ? "bg-qc-lime text-qc-black font-semibold"
@@ -1003,7 +1530,10 @@ export function BusinessProfileForm({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setSlotDurationMinutes(60)}
+                      onClick={() => {
+                        setSlotDurationMinutes(60);
+                        setCourts((prev) => prev.map((c) => ({ ...c, slotDurationMinutes: 60 })));
+                      }}
                       className={`px-2.5 py-1 text-xs font-mono transition ${
                         slotDurationMinutes === 60
                           ? "bg-qc-lime text-qc-black font-semibold"
@@ -1033,6 +1563,13 @@ export function BusinessProfileForm({
                       onChange={(e) => {
                         setNewCourtName(e.target.value);
                         if (courtError) setCourtError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleAddCourt();
+                        }
                       }}
                       placeholder="e.g. Main Turf A, Court 1"
                       className="mt-1 w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
@@ -1076,6 +1613,13 @@ export function BusinessProfileForm({
                         step="50"
                         value={newCourtPrice}
                         onChange={(e) => setNewCourtPrice(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleAddCourt();
+                          }
+                        }}
                         placeholder="800"
                         className="w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
                       />
@@ -1186,7 +1730,13 @@ export function BusinessProfileForm({
 
               <Button
                 type="submit"
-                disabled={saving || uploadingLogo || uploadingCover}
+                disabled={
+                  saving ||
+                  uploadingLogo ||
+                  uploadingCover ||
+                  isUploadingGallery ||
+                  uploadQueue.some((i) => i.status === "uploading")
+                }
                 size="lg"
                 className="gap-2 w-full sm:w-auto"
               >
@@ -1204,6 +1754,67 @@ export function BusinessProfileForm({
               </Button>
             </div>
           </section>
+        )}
+
+        {/* Delete Photo Confirmation Modal */}
+        {deleteConfirmPhoto && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md border border-white/20 bg-qc-panel p-6 shadow-2xl space-y-4">
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-2 text-red-400">
+                  <Trash2 className="h-5 w-5" />
+                  <h3 className="font-display text-lg text-qc-white">Delete Business Photo?</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmPhoto(null)}
+                  disabled={deletingPhotoId !== null}
+                  className="text-white/40 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="relative aspect-[16/9] w-full overflow-hidden border border-white/10 bg-black/40">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={deleteConfirmPhoto.url}
+                  alt="Photo to delete"
+                  className="h-full w-full object-cover"
+                />
+              </div>
+
+              <p className="text-xs text-qc-muted leading-relaxed">
+                This photo will be permanently deleted from ImageKit CDN and removed from your business profile. This action cannot be undone.
+              </p>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteConfirmPhoto(null)}
+                  disabled={deletingPhotoId !== null}
+                  className="border border-white/20 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-white/70 hover:border-white/40 hover:text-white transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeletePhoto}
+                  disabled={deletingPhotoId !== null}
+                  className="inline-flex items-center gap-1.5 border border-red-500/50 bg-red-600 px-4 py-2 text-xs font-bold uppercase tracking-wider text-white hover:bg-red-700 disabled:opacity-50 transition"
+                >
+                  {deletingPhotoId !== null ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <span>Delete Photo</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </form>
     </div>

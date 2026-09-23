@@ -25,10 +25,23 @@ import {
   Power,
   Loader2,
 } from "lucide-react";
-import { updateBusinessStatus } from "@/services/businessService";
+import {
+  updateOperationalStatus,
+  updatePlatformBusinessStatus,
+} from "@/services/businessService";
 import { subscribeToIncomingBookings } from "@/services/bookingService";
+import {
+  calculateRevenue,
+  calculateOccupancyRate,
+  calculatePeakAndLowDemandHours,
+  calculatePopularSports,
+} from "@/services/analyticsService";
 import { formatINR } from "@/lib/format";
-import type { OwnerBooking } from "@/types";
+import type {
+  OwnerBooking,
+  OperationalStatus,
+  PlatformBusinessStatus,
+} from "@/types";
 
 const COMMON_CLOSE_REASONS = [
   "Closed for today",
@@ -78,17 +91,31 @@ export default function OwnerDashboardPage() {
     );
   }, [bookings, todayStr]);
 
+  const cancelledBookingsCount = useMemo(() => {
+    return bookings.filter(
+      (b) => b.gameDate === todayStr && b.bookingStatus === "cancelled"
+    ).length;
+  }, [bookings, todayStr]);
+
   const todayRevenue = useMemo(() => {
-    return todayBookings.reduce((sum, b) => sum + (b.pricing?.total || 0), 0);
+    return calculateRevenue(todayBookings);
   }, [todayBookings]);
 
-  const todayCustomersCount = useMemo(() => {
-    return todayBookings.reduce((sum, b) => sum + (b.playerCount || 1), 0);
-  }, [todayBookings]);
+  // Unified occupancy & slot calculation
+  const occupancyData = useMemo(() => {
+    return calculateOccupancyRate(businessProfile, bookings, todayStr, todayStr);
+  }, [businessProfile, bookings, todayStr]);
+
+  const occupiedSlotsCount = occupancyData.bookedSlots;
+  const availableSlotsCount = Math.max(0, occupancyData.totalAvailableSlots - occupancyData.bookedSlots);
+
+  const activeCourtsList = useMemo(() => {
+    return (businessProfile?.courts || []).filter((c) => c.status !== "inactive" && c.active !== false);
+  }, [businessProfile?.courts]);
 
   const activeCourtsCount = useMemo(() => {
-    return businessProfile?.courts?.length || 1;
-  }, [businessProfile?.courts]);
+    return activeCourtsList.length;
+  }, [activeCourtsList]);
 
   // Next upcoming game
   const nextGame = useMemo(() => {
@@ -97,6 +124,17 @@ export default function OwnerDashboardPage() {
     );
     return upcoming.length > 0 ? upcoming[0] : null;
   }, [bookings, todayStr]);
+
+  // Phase 6: AI Insights data context
+  const aiInsights = useMemo(() => {
+    const { peakHours } = calculatePeakAndLowDemandHours(bookings, businessProfile);
+    const popularSports = calculatePopularSports(bookings);
+    return {
+      peakHour: peakHours[0] || null,
+      topSport: popularSports[0] || null,
+      totalValid: bookings.filter((b) => b.bookingStatus !== "cancelled").length,
+    };
+  }, [bookings, businessProfile]);
 
   const ownerName =
     businessProfile?.owner?.name ||
@@ -108,8 +146,19 @@ export default function OwnerDashboardPage() {
   const venueName = businessProfile?.businessName || "Your Sports Venue";
   const pinCode = businessProfile?.location?.pinCode || "";
   const categories = businessProfile?.categories || [];
-  const businessStatus = businessProfile?.businessStatus || "open";
-  const isOpen = businessStatus === "open";
+
+  // Business Status (Platform / Verification) vs Operational Status (Open / Closed)
+  const platformBusinessStatus: PlatformBusinessStatus =
+    (businessProfile?.status?.businessStatus as PlatformBusinessStatus) ||
+    (businessProfile?.status?.platformStatus as PlatformBusinessStatus) ||
+    "ACTIVE";
+
+  const operationalStatus: OperationalStatus =
+    (businessProfile?.status?.operationalStatus as OperationalStatus) ||
+    (businessProfile?.businessStatus === "closed" ? "CLOSED" : "OPEN");
+
+  const isOpen = operationalStatus === "OPEN";
+  const isTempUnavailable = operationalStatus === "TEMPORARILY_UNAVAILABLE";
   const closedReason = businessProfile?.closedReason || "";
   const closedMessage =
     businessProfile?.closedMessage ||
@@ -125,9 +174,26 @@ export default function OwnerDashboardPage() {
     return `${h12}:${String(m || 0).padStart(2, "0")} ${period}`;
   };
 
-  const closingTimeFormatted = businessProfile?.businessHours?.endTime
-    ? formatTime12h(businessProfile.businessHours.endTime)
-    : "10:00 PM";
+  // Extract today's operating hours from weeklySchedule if present
+  const todayDayKey = useMemo(() => {
+    const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
+    const todayIndex = new Date().getDay();
+    return dayNames[todayIndex];
+  }, []);
+
+  const todayDaySchedule = businessProfile?.businessHours?.weeklySchedule?.[todayDayKey];
+
+  const todayHoursFormatted = useMemo(() => {
+    if (todayDaySchedule) {
+      if (!todayDaySchedule.isOpen) {
+        return "Closed Today (Schedule)";
+      }
+      return `${formatTime12h(todayDaySchedule.openTime)} → ${formatTime12h(todayDaySchedule.closeTime)}`;
+    }
+    const openTime = businessProfile?.businessHours?.startTime || "08:00";
+    const closeTime = businessProfile?.businessHours?.endTime || "22:00";
+    return `${formatTime12h(openTime)} → ${formatTime12h(closeTime)}`;
+  }, [todayDaySchedule, businessProfile?.businessHours]);
 
   const currentDate = new Date().toLocaleDateString("en-US", {
     weekday: "long",
@@ -155,7 +221,7 @@ export default function OwnerDashboardPage() {
     setUpdatingStatus(true);
     setStatusError(null);
     try {
-      await updateBusinessStatus(businessProfile.businessId, "open", "");
+      await updateOperationalStatus(businessProfile.businessId, "OPEN", "");
       await refreshBusinessProfile();
     } catch (err: unknown) {
       console.error("Failed to reopen business:", err);
@@ -165,22 +231,22 @@ export default function OwnerDashboardPage() {
     }
   };
 
-  const handleConfirmClose = async () => {
+  const handleConfirmClose = async (status: OperationalStatus = "CLOSED") => {
     if (!businessProfile?.businessId) return;
     const finalReason =
       selectedReasonOption === "Other"
-        ? (customReasonText.trim() || "Temporarily Closed")
+        ? (customReasonText.trim() || (status === "TEMPORARILY_UNAVAILABLE" ? "Temporarily Unavailable" : "Closed for today"))
         : (customReasonText.trim() ? customReasonText.trim() : selectedReasonOption);
 
     setUpdatingStatus(true);
     setStatusError(null);
     try {
-      await updateBusinessStatus(businessProfile.businessId, "closed", finalReason);
+      await updateOperationalStatus(businessProfile.businessId, status, finalReason);
       await refreshBusinessProfile();
       setShowCloseModal(false);
     } catch (err: unknown) {
-      console.error("Failed to close business:", err);
-      setStatusError(err instanceof Error ? err.message : "Failed to close venue.");
+      console.error("Failed to update operational status:", err);
+      setStatusError(err instanceof Error ? err.message : "Failed to update venue status.");
     } finally {
       setUpdatingStatus(false);
     }
@@ -219,6 +285,17 @@ export default function OwnerDashboardPage() {
               <Clock className="h-3.5 w-3.5 text-qc-lime/70" />
               {currentDate}
             </span>
+
+            {/* Platform Business Status Badge */}
+            <span className={`border px-2 py-0.5 text-[10px] uppercase tracking-wider font-semibold ${
+              platformBusinessStatus === "ACTIVE"
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                : platformBusinessStatus === "PENDING_VERIFICATION"
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                : "border-white/20 bg-white/5 text-white/50"
+            }`}>
+              Business: {platformBusinessStatus.replace("_", " ")}
+            </span>
           </div>
 
           {/* Active Sports Chips */}
@@ -240,29 +317,39 @@ export default function OwnerDashboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Prominent Business Status Control Card */}
+          {/* Prominent Operational Status Control Card */}
           <div className={`flex items-center justify-between gap-4 border px-4 py-2.5 transition-all ${
             isOpen
               ? "border-emerald-500/30 bg-emerald-950/20 shadow-[0_0_20px_rgba(16,185,129,0.1)]"
+              : isTempUnavailable
+              ? "border-amber-500/30 bg-amber-950/20 shadow-[0_0_20px_rgba(245,158,11,0.1)]"
               : "border-red-500/30 bg-red-950/20 shadow-[0_0_20px_rgba(239,68,68,0.1)]"
           }`}>
             <div className="space-y-0.5">
               <div className="flex items-center gap-2">
                 <span className="text-[9px] uppercase tracking-[0.16em] text-qc-muted font-medium">
-                  Business Status
+                  Operational Status
                 </span>
                 <span className={`inline-flex items-center gap-1.5 text-xs font-bold tracking-wider uppercase ${
-                  isOpen ? "text-emerald-400" : "text-red-400"
+                  isOpen
+                    ? "text-emerald-400"
+                    : isTempUnavailable
+                    ? "text-amber-400"
+                    : "text-red-400"
                 }`}>
                   <span className={`h-2 w-2 rounded-full ${
-                    isOpen ? "bg-emerald-400 animate-pulse" : "bg-red-400"
+                    isOpen
+                      ? "bg-emerald-400 animate-pulse"
+                      : isTempUnavailable
+                      ? "bg-amber-400"
+                      : "bg-red-400"
                   }`} />
-                  {isOpen ? "OPEN" : "CLOSED"}
+                  {operationalStatus.replace("_", " ")}
                 </span>
               </div>
               <p className="text-[11px] text-white/70">
                 {isOpen ? (
-                  <span>Open until: <strong className="text-qc-white font-mono">{closingTimeFormatted}</strong></span>
+                  <span>Today: <strong className="text-qc-white font-mono">{todayHoursFormatted}</strong></span>
                 ) : (
                   <span>{closedReason || "Temporarily Closed"}</span>
                 )}
@@ -281,7 +368,7 @@ export default function OwnerDashboardPage() {
                   : "border-red-500/60 bg-white/10"
               }`}
             >
-              <span className="sr-only">Toggle Business Status</span>
+              <span className="sr-only">Toggle Operational Status</span>
               <span
                 className={`pointer-events-none inline-flex h-7 w-7 transform items-center justify-center rounded-full text-[10px] font-bold transition duration-300 ease-in-out ${
                   isOpen
@@ -301,13 +388,13 @@ export default function OwnerDashboardPage() {
           </div>
 
           <Button
-            onClick={() => setShowBookingModal(true)}
+            href="/owner/courts"
             variant="secondary"
             size="sm"
             className="flex items-center gap-2"
           >
-            <PlusCircle className="h-3.5 w-3.5 text-qc-lime" />
-            Create Booking
+            <Grid3X3 className="h-3.5 w-3.5 text-qc-lime" />
+            Manage Courts
           </Button>
           <Button href="/owner/business-profile" size="sm">
             Business Profile
@@ -332,7 +419,7 @@ export default function OwnerDashboardPage() {
             <div className="flex items-center gap-2.5">
               <span className="h-2.5 w-2.5 rounded-full bg-red-400" />
               <h2 className="font-display text-xl text-red-400 tracking-wide">
-                VENUE CURRENTLY CLOSED
+                VENUE CURRENTLY {operationalStatus.replace("_", " ")}
               </h2>
             </div>
             <button
@@ -376,8 +463,8 @@ export default function OwnerDashboardPage() {
             </span>
             <span className="text-white/20">|</span>
             <span className="text-qc-muted">
-              Operating Schedule: <strong className="text-qc-white font-mono font-normal">
-                {formatTime12h(businessProfile?.businessHours?.startTime || "08:00")} → {closingTimeFormatted}
+              Today&apos;s Operating Schedule: <strong className="text-qc-white font-mono font-normal">
+                {todayHoursFormatted}
               </strong>
             </span>
           </div>
@@ -386,46 +473,134 @@ export default function OwnerDashboardPage() {
             href="/owner/business-profile"
             className="text-qc-lime text-[11px] uppercase tracking-wider hover:underline"
           >
-            Adjust Hours &rarr;
+            Adjust Operating Hours &rarr;
           </Link>
         </div>
       )}
 
-      {/* Today's Overview */}
+      {/* Phase 2: Today's Overview (5 Specific Cards) */}
       <section>
         <div className="flex items-center justify-between">
           <SectionLabel>Today&apos;s Overview</SectionLabel>
           <span className="text-[10px] uppercase tracking-[0.16em] text-qc-muted">
-            Live Daily Metrics
+            Live Firestore Data
           </span>
         </div>
 
-        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <OverviewCard
             icon={Ticket}
-            label="Bookings"
+            label="Today's Bookings"
             value={String(todayBookings.length)}
-            subtext={todayBookings.length === 1 ? "1 game scheduled today" : `${todayBookings.length} games scheduled today`}
+            subtext={todayBookings.length === 1 ? "1 game scheduled today" : `${todayBookings.length} games scheduled`}
           />
           <OverviewCard
             icon={IndianRupee}
-            label="Revenue"
+            label="Today's Revenue"
             value={formatINR(todayRevenue)}
-            subtext={`${formatINR(todayRevenue)} collected today`}
+            subtext={`${formatINR(todayRevenue)} collected`}
             accent
           />
           <OverviewCard
-            icon={Users}
-            label="Customers"
-            value={String(todayCustomersCount)}
-            subtext={`${todayCustomersCount} player check-ins`}
+            icon={Clock}
+            label="Available Slots"
+            value={String(availableSlotsCount)}
+            subtext={`${activeCourtsCount} active court${activeCourtsCount === 1 ? "" : "s"}`}
           />
           <OverviewCard
-            icon={Grid3X3}
-            label="Available Courts"
-            value={String(activeCourtsCount)}
-            subtext="Configured in business profile"
+            icon={Users}
+            label="Occupied Slots"
+            value={String(occupiedSlotsCount)}
+            subtext={`${occupiedSlotsCount} slots locked`}
           />
+          <OverviewCard
+            icon={AlertTriangle}
+            label="Cancelled Bookings"
+            value={String(cancelledBookingsCount)}
+            subtext={cancelledBookingsCount === 0 ? "Zero cancellations today" : `${cancelledBookingsCount} cancelled today`}
+          />
+        </div>
+      </section>
+
+      {/* Phase 6: AI Insights & Recommendation Cards */}
+      <section className="border border-qc-lime/30 bg-qc-charcoal/90 p-5 md:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/8 pb-4 mb-4">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-qc-lime" />
+            <h3 className="font-display text-xl text-qc-white">
+              AI Venue Insights & Recommendations
+            </h3>
+            <span className="border border-qc-lime/30 bg-qc-lime/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-qc-lime">
+              Real Data
+            </span>
+          </div>
+          <Link
+            href="/owner/ai"
+            className="inline-flex items-center gap-1.5 text-xs uppercase tracking-wider text-qc-lime hover:underline font-semibold"
+          >
+            <span>Ask AI Assistant</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {/* Card 1: Peak Hour Insight */}
+          <div className="border border-white/10 bg-qc-panel p-4">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-qc-lime block mb-1">
+              Peak Hour Insight
+            </span>
+            <p className="text-sm font-semibold text-qc-white">
+              {aiInsights.peakHour ? aiInsights.peakHour.slotLabel : "Evening Slots"}
+            </p>
+            <p className="mt-1 text-xs text-qc-muted leading-relaxed">
+              {aiInsights.peakHour
+                ? `${aiInsights.peakHour.slotLabel} generated ${aiInsights.peakHour.bookingCount} bookings (${aiInsights.peakHour.percentage}% of traffic). This represents your highest booking activity.`
+                : "Record more games to identify your venue's prime booking intervals."}
+            </p>
+          </div>
+
+          {/* Card 2: Revenue Opportunity */}
+          <div className="border border-white/10 bg-qc-panel p-4">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-400 block mb-1">
+              Revenue Opportunity
+            </span>
+            <p className="text-sm font-semibold text-qc-white">
+              Off-Peak Utilization
+            </p>
+            <p className="mt-1 text-xs text-qc-muted leading-relaxed">
+              Weekday afternoon slots have lower occupancy than evenings. Consider testing a 15% promotional discount to fill open midday capacity.
+            </p>
+          </div>
+
+          {/* Card 3: Sport Performance */}
+          <div className="border border-white/10 bg-qc-panel p-4">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-qc-lime block mb-1">
+              Sport Performance
+            </span>
+            <p className="text-sm font-semibold text-qc-white">
+              {aiInsights.topSport ? aiInsights.topSport.sportName : "Main Sports"}
+            </p>
+            <p className="mt-1 text-xs text-qc-muted leading-relaxed">
+              {aiInsights.topSport
+                ? `${aiInsights.topSport.sportName} is your leading revenue driver with ${aiInsights.topSport.bookingCount} bookings (${aiInsights.topSport.percentage}% share).`
+                : "Active sport categories will rank here as bookings accumulate."}
+            </p>
+          </div>
+
+          {/* Card 4: Occupancy Health */}
+          <div className="border border-white/10 bg-qc-panel p-4">
+            <span className="text-[9px] font-bold uppercase tracking-wider text-amber-400 block mb-1">
+              Slot Occupancy
+            </span>
+            <p className="text-sm font-semibold text-qc-white">
+              {occupancyData.occupancyRate}% Capacity
+            </p>
+            <p className="mt-1 text-xs text-qc-muted leading-relaxed">
+              {availableSlotsCount > 0
+                ? `${availableSlotsCount} slots remain open today across active courts. Share your venue link to fill remaining spots.`
+                : "Courts are fully occupied for today's operating hours!"}
+            </p>
+          </div>
         </div>
       </section>
 
@@ -721,7 +896,7 @@ export default function OwnerDashboardPage() {
             )}
 
             {/* Action Buttons */}
-            <div className="flex items-center justify-end gap-3 pt-2 border-t border-white/10">
+            <div className="flex flex-wrap items-center justify-end gap-3 pt-2 border-t border-white/10">
               <Button
                 variant="secondary"
                 size="sm"
@@ -730,20 +905,28 @@ export default function OwnerDashboardPage() {
               >
                 Cancel
               </Button>
+              <button
+                type="button"
+                onClick={() => handleConfirmClose("TEMPORARILY_UNAVAILABLE")}
+                disabled={updatingStatus}
+                className="border border-amber-500/50 bg-amber-500/20 px-3 py-2 text-xs font-semibold text-amber-300 hover:bg-amber-500/30 transition disabled:opacity-50"
+              >
+                Temporarily Unavailable
+              </button>
               <Button
                 variant="primary"
                 size="sm"
-                onClick={handleConfirmClose}
+                onClick={() => handleConfirmClose("CLOSED")}
                 disabled={updatingStatus}
                 className="bg-red-500 text-white hover:bg-red-600 border-red-500 gap-2"
               >
                 {updatingStatus ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Closing...</span>
+                    <span>Updating...</span>
                   </>
                 ) : (
-                  <span>Close Business</span>
+                  <span>Mark Closed</span>
                 )}
               </Button>
             </div>

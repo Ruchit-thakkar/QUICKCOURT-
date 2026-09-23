@@ -27,7 +27,7 @@ export function QuickFillCard({ offer }: { offer: QuickFillOffer }) {
         {offer.nearbyPlayers} nearby · expected {formatPct(offer.expectedOccupancy)}
       </p>
       <div className="mt-5">
-        <Button href="/player/games" size="sm">
+        <Button href="#booking" size="sm">
           Claim spot
         </Button>
       </div>

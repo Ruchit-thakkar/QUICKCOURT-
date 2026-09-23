@@ -1,4 +1,10 @@
-import { PlayerNavbar, PlayerTopBar } from "@/components/player/PlayerNavbar";
+import { AuthProvider } from "@/context/AuthContext";
+import { PlayerLayoutWrapper } from "@/components/player/PlayerLayoutWrapper";
+
+export const metadata = {
+  title: "Play · QuickCourt",
+  description: "Discover nearby sports facilities, turfs, and courts. Play your game.",
+};
 
 export default function PlayerLayout({
   children,
@@ -6,10 +12,8 @@ export default function PlayerLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-qc-black pb-24 md:pb-0">
-      <PlayerTopBar />
-      <div className="mx-auto max-w-6xl px-4 py-6 md:px-6 md:py-8">{children}</div>
-      <PlayerNavbar />
-    </div>
+    <AuthProvider>
+      <PlayerLayoutWrapper>{children}</PlayerLayoutWrapper>
+    </AuthProvider>
   );
 }

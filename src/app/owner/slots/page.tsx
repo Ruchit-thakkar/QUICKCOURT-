@@ -1,19 +1,20 @@
-import { slots } from "@/data/mock";
-import { SlotCard } from "@/components/ui/Cards";
-import { SectionLabel } from "@/components/ui/SectionLabel";
+"use client";
 
-export default function OwnerSlotsPage() {
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Loader2 } from "lucide-react";
+
+export default function OwnerSlotsRedirectPage() {
+  const router = useRouter();
+
+  useEffect(() => {
+    router.replace("/owner/bookings");
+  }, [router]);
+
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      <header>
-        <SectionLabel>Slots</SectionLabel>
-        <h1 className="mt-3 font-display text-5xl">Availability board</h1>
-      </header>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {slots.map((s) => (
-          <SlotCard key={s.id} slot={s} />
-        ))}
-      </div>
+    <div className="flex min-h-[50vh] flex-col items-center justify-center gap-3 text-qc-muted">
+      <Loader2 className="h-6 w-6 animate-spin text-qc-lime" />
+      <p className="text-xs uppercase tracking-wider">Redirecting to Bookings...</p>
     </div>
   );
 }

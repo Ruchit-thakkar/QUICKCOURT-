@@ -46,7 +46,7 @@ export function FacilityCard({
           </span>
         </div>
       </div>
-      <Button href={`/player/explore?facility=${facility.id}`} size="sm" className="w-fit">
+      <Button href="#booking" size="sm" className="w-fit">
         {cta}
       </Button>
     </article>

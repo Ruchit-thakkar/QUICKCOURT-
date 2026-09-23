@@ -198,9 +198,9 @@ export function BookingConfirmation({
           <Row label="Players" value={String(players)} />
           <Row label="Total" value={formatINR(total)} />
         </div>
-        <div className="mt-10 flex justify-center">
-          <Button href="/player/games" size="lg">
-            View game
+        <div className="mt-10 flex justify-center gap-3">
+          <Button href="/owner/login" size="lg">
+            Facility Portal
           </Button>
         </div>
       </motion.div>

@@ -5,16 +5,42 @@ import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import {
   subscribeToIncomingBookings,
-  getExistingBookingsForDate,
+  subscribeToDateBookings,
+  subscribeToBlockedSlots,
+  subscribeToDateAvailability,
+  bookSlotAtomically,
   createManualBooking,
   confirmBooking,
   cancelBooking,
+  cancelBookingWithLock,
+  markBookingCompleted,
+  markBookingNoShow,
+  blockSlotAtomically,
+  unblockSlot,
+  generateReadableBookingId,
 } from "@/services/bookingService";
+import {
+  generateSlotsForCourt,
+  getNowInTimezone,
+  format12Hour,
+  timeToMinutes,
+  minutesToTime,
+} from "@/lib/slotGenerator";
 import { ALL_SPORTS_CATEGORIES } from "@/components/owner/BusinessProfileForm";
 import { SectionLabel } from "@/components/ui/SectionLabel";
 import { Button } from "@/components/ui/Button";
 import { formatINR } from "@/lib/format";
-import type { OwnerBooking, VenueCourt } from "@/types";
+import { cn } from "@/lib/cn";
+import type {
+  OwnerBooking,
+  VenueCourt,
+  BlockedSlot,
+  BookingSource,
+  GeneratedSlot,
+  SlotLockData,
+  BookingStatus,
+  PaymentStatus,
+} from "@/types";
 import {
   Calendar,
   Clock,
@@ -26,63 +52,81 @@ import {
   XCircle,
   AlertTriangle,
   Loader2,
-  CalendarCheck,
   ChevronRight,
-  Filter,
+  ChevronLeft,
   X,
   Sparkles,
-  ArrowRight,
   Check,
+  Lock,
+  Unlock,
+  Ban,
+  Ticket,
+  Grid3X3,
+  Layers,
+  ArrowRight,
 } from "lucide-react";
-
-interface TimeSlot {
-  startTime: string; // "18:00"
-  endTime: string;   // "19:00"
-  label: string;     // "18:00 - 19:00"
-  available: boolean;
-  bookedBy?: string;
-}
 
 export default function OwnerBookingsPage() {
   const { user, businessProfile } = useAuth();
 
-  const [bookings, setBookings] = useState<OwnerBooking[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [selectedSportFilter, setSelectedSportFilter] = useState<string>("all");
+  // Active view: "grounds" (Grounds & Real-time Slots) or "table" (All Bookings Table)
+  const [viewMode, setViewMode] = useState<"grounds" | "table">("grounds");
+
+  // Selected date for Ground Slots view (default today in venue timezone)
+  const [selectedDate, setSelectedDate] = useState<string>(() => {
+    const tz = businessProfile?.businessHours?.timezone || "Asia/Kolkata";
+    return getNowInTimezone(tz).dateStr;
+  });
+
+  // Real-time data states
+  const [bookings, setBookings] = useState<OwnerBooking[]>([]); // all incoming bookings
+  const [dateBookings, setDateBookings] = useState<OwnerBooking[]>([]); // date-specific bookings
+  const [dateBlockedSlots, setDateBlockedSlots] = useState<BlockedSlot[]>([]); // date-specific blocks
+  const [dateSlotLocks, setDateSlotLocks] = useState<SlotLockData[]>([]); // live slot locks
+  const [loadingAll, setLoadingAll] = useState(true);
+  const [loadingDate, setLoadingDate] = useState(true);
 
   // Selected booking for detailed drawer view
-  const [selectedBooking, setSelectedBooking] = useState<OwnerBooking | null>(null);
+  const [inspectBooking, setInspectBooking] = useState<OwnerBooking | null>(null);
 
-  // Modal states
+  // Table view filters
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [viewTab, setViewTab] = useState<"all" | "today" | "upcoming" | "past" | "cancelled">("all");
+
+  // Manual New Booking Modal state
   const [showNewBookingModal, setShowNewBookingModal] = useState(false);
-  const [cancelModalBooking, setCancelModalBooking] = useState<OwnerBooking | null>(null);
-  const [cancellationReason, setCancellationReason] = useState("Player requested cancellation");
-  const [actionLoading, setActionLoading] = useState(false);
-
-  // New Booking Wizard state
-  const [bookingDate, setBookingDate] = useState(() => {
-    return new Date().toISOString().split("T")[0];
-  });
-  const [bookingSportId, setBookingSportId] = useState("");
-  const [selectedCourtId, setSelectedCourtId] = useState("");
-  const [selectedSlot, setSelectedSlot] = useState<TimeSlot | null>(null);
-  const [existingBookingsForDate, setExistingBookingsForDate] = useState<OwnerBooking[]>([]);
-  const [loadingSlots, setLoadingSlots] = useState(false);
-
-  // Customer Details Form State
+  const [modalCourtId, setModalCourtId] = useState<string>("");
+  const [modalSportId, setModalSportId] = useState<string>("");
+  const [modalDate, setModalDate] = useState<string>(selectedDate);
+  const [modalSlot, setModalSlot] = useState<GeneratedSlot | null>(null);
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [playerCount, setPlayerCount] = useState("2");
   const [bookingAmount, setBookingAmount] = useState("");
-  const [paymentStatus, setPaymentStatus] = useState<"paid" | "pending">("paid");
+  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>("paid");
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "upi" | "card" | "offline">("cash");
-  const [formError, setFormError] = useState<string | null>(null);
   const [submittingBooking, setSubmittingBooking] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
 
-  // Business profile details
+  // Slot blocking modal
+  const [blockingSlot, setBlockingSlot] = useState<{
+    court: VenueCourt;
+    slot: GeneratedSlot;
+  } | null>(null);
+  const [blockReason, setBlockReason] = useState<string>("Maintenance");
+  const [customReason, setCustomReason] = useState<string>("");
+
+  // Actions loading
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // Cancellation modal
+  const [cancelModalBooking, setCancelModalBooking] = useState<OwnerBooking | null>(null);
+  const [cancellationReason, setCancellationReason] = useState("Customer requested cancellation");
+
+  // Business profile categories & courts
   const businessCategories = useMemo(() => {
     return businessProfile?.categories || [];
   }, [businessProfile]);
@@ -91,36 +135,42 @@ export default function OwnerBookingsPage() {
     if (businessProfile?.courts && businessProfile.courts.length > 0) {
       return businessProfile.courts;
     }
-    // Fallback court if none explicitly created
+    const fallbackSport = businessCategories[0] || "cricket";
     return [
       {
         courtId: "default_court_1",
-        name: "Main Ground",
-        sportId: businessCategories[0] || "cricket",
-        sportName: "Main Sport",
+        name: "Ground 1",
+        sportId: fallbackSport,
+        sportName: "Cricket",
         pricePerHour: 800,
         slotDurationMinutes: businessProfile?.slotDurationMinutes || 60,
+        status: "active",
       },
     ];
   }, [businessProfile, businessCategories]);
 
-  // Real-time listener for incoming bookings
+  // Active (bookable) courts
+  const activeCourts = useMemo(() => {
+    return courts.filter((c) => c.status !== "inactive" && c.active !== false);
+  }, [courts]);
+
+  // Real-time listener for ALL incoming bookings (for table & tab counters)
   useEffect(() => {
     if (!businessProfile?.businessId) {
-      setLoading(false);
+      setLoadingAll(false);
       return;
     }
 
-    setLoading(true);
+    setLoadingAll(true);
     const unsubscribe = subscribeToIncomingBookings(
       businessProfile.businessId,
       (data) => {
         setBookings(data);
-        setLoading(false);
+        setLoadingAll(false);
       },
       (err) => {
-        console.error("Failed to load bookings:", err);
-        setLoading(false);
+        console.error("Failed to stream all bookings:", err);
+        setLoadingAll(false);
       },
       user?.uid
     );
@@ -128,341 +178,419 @@ export default function OwnerBookingsPage() {
     return () => unsubscribe();
   }, [businessProfile?.businessId, user?.uid]);
 
-  // Set default sport and court when opening new booking modal
+  // Real-time listeners for SELECTED DATE (Authoritative Live Availability)
   useEffect(() => {
-    if (showNewBookingModal) {
-      const initialSport = businessCategories[0] || "cricket";
-      setBookingSportId(initialSport);
-      const matchingCourt = courts.find((c) => c.sportId === initialSport) || courts[0];
-      setSelectedCourtId(matchingCourt?.courtId || "");
-      setSelectedSlot(null);
-      setFormError(null);
+    if (!businessProfile?.businessId || !selectedDate) {
+      setLoadingDate(false);
+      return;
     }
-  }, [showNewBookingModal, businessCategories, courts]);
 
-  // When date or business changes, fetch date-specific bookings to compute slot availability
-  useEffect(() => {
-    if (!businessProfile?.businessId || !bookingDate || !showNewBookingModal) return;
+    setLoadingDate(true);
 
-    let active = true;
-    setLoadingSlots(true);
-    getExistingBookingsForDate(businessProfile.businessId, bookingDate, user?.uid)
-      .then((items) => {
-        if (active) {
-          setExistingBookingsForDate(items);
-          setLoadingSlots(false);
-        }
-      })
-      .catch((err) => {
-        console.error("Error fetching existing bookings for date:", err);
-        if (active) setLoadingSlots(false);
-      });
+    // 1. Live bookings for selected date (with customer info)
+    const unsubBookings = subscribeToDateBookings(
+      businessProfile.businessId,
+      selectedDate,
+      (bks) => {
+        setDateBookings(bks);
+        setLoadingDate(false);
+      },
+      (err) => {
+        console.error("Date bookings stream error:", err);
+        setLoadingDate(false);
+      }
+    );
+
+    // 2. Live blocked slots for selected date
+    const unsubBlocks = subscribeToBlockedSlots(
+      businessProfile.businessId,
+      selectedDate,
+      (blks) => {
+        setDateBlockedSlots(blks);
+      },
+      (err) => console.error("Date blocks stream error:", err)
+    );
+
+    // 3. Live slot locks for selected date (prevent race condition)
+    const unsubLocks = subscribeToDateAvailability(
+      businessProfile.businessId,
+      selectedDate,
+      (lcks) => {
+        setDateSlotLocks(lcks);
+      },
+      (err) => console.error("Date slot locks stream error:", err)
+    );
 
     return () => {
-      active = false;
+      unsubBookings();
+      unsubBlocks();
+      unsubLocks();
     };
-  }, [businessProfile?.businessId, bookingDate, showNewBookingModal, user?.uid]);
+  }, [businessProfile?.businessId, selectedDate]);
 
-  // Update selected court when sport changes
-  const handleSportChange = (sportId: string) => {
-    setBookingSportId(sportId);
-    const matchingCourts = courts.filter((c) => c.sportId === sportId);
-    if (matchingCourts.length > 0) {
-      setSelectedCourtId(matchingCourts[0].courtId);
-    } else if (courts.length > 0) {
-      setSelectedCourtId(courts[0].courtId);
-    }
-    setSelectedSlot(null);
+  // Today reference in business timezone
+  const todayStr = useMemo(() => {
+    const tz = businessProfile?.businessHours?.timezone || "Asia/Kolkata";
+    return getNowInTimezone(tz).dateStr;
+  }, [businessProfile?.businessHours?.timezone]);
+
+  // Quick Date Navigation
+  const handleStepDate = (days: number) => {
+    const current = new Date(`${selectedDate}T12:00:00`);
+    current.setDate(current.getDate() + days);
+    setSelectedDate(current.toISOString().split("T")[0]);
   };
 
-  // Helper: Convert "HH:mm" to minutes from midnight
-  const timeToMinutes = (timeStr: string): number => {
-    const [h, m] = timeStr.split(":").map(Number);
-    return (h || 0) * 60 + (m || 0);
-  };
+  // Open New Booking Modal for a specific slot
+  const handleOpenSlotBooking = (court: VenueCourt, slot: GeneratedSlot) => {
+    if (slot.isBooked) {
+      // Find matching booking to inspect
+      const match =
+        dateBookings.find(
+          (b) =>
+            b.court.courtId === court.courtId &&
+            b.startTime === slot.startTime &&
+            b.bookingStatus !== "cancelled"
+        ) ||
+        bookings.find(
+          (b) =>
+            b.court.courtId === court.courtId &&
+            b.gameDate === selectedDate &&
+            b.startTime === slot.startTime &&
+            b.bookingStatus !== "cancelled"
+        );
 
-  // Helper: Convert minutes from midnight to "HH:mm"
-  const minutesToTime = (totalMinutes: number): string => {
-    const h = Math.floor(totalMinutes / 60);
-    const m = totalMinutes % 60;
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-  };
-
-  // Helper: Format 24h "18:00" to 12h "06:00 PM"
-  const format12h = (time24: string): string => {
-    if (!time24) return "";
-    const [h, m] = time24.split(":").map(Number);
-    if (isNaN(h)) return time24;
-    const period = h >= 12 ? "PM" : "AM";
-    const h12 = h % 12 || 12;
-    return `${String(h12).padStart(2, "0")}:${String(m || 0).padStart(2, "0")} ${period}`;
-  };
-
-  // Generate Slots dynamically based on venue hours and court/duration settings
-  const generatedSlots: TimeSlot[] = useMemo(() => {
-    const startStr = businessProfile?.businessHours?.startTime || "08:00";
-    const endStr = businessProfile?.businessHours?.endTime || "22:00";
-
-    const currentCourt = courts.find((c) => c.courtId === selectedCourtId) || courts[0];
-    const durationMinutes =
-      currentCourt?.slotDurationMinutes || businessProfile?.slotDurationMinutes || 60;
-
-    let startMins = timeToMinutes(startStr);
-    const endMins = timeToMinutes(endStr);
-
-    // If closing time is earlier than opening time (e.g. overnight 08:00 to 02:00), clamp or extend
-    const actualEndMins = endMins <= startMins ? endMins + 24 * 60 : endMins;
-
-    const slots: TimeSlot[] = [];
-
-    while (startMins + durationMinutes <= actualEndMins) {
-      const slotStart = minutesToTime(startMins % (24 * 60));
-      const slotEnd = minutesToTime((startMins + durationMinutes) % (24 * 60));
-
-      // Check if slot overlaps with any existing non-cancelled booking on this court
-      const overlappingBooking = existingBookingsForDate.find((b) => {
-        if (b.court?.courtId && selectedCourtId && b.court.courtId !== selectedCourtId) {
-          return false;
-        }
-        const bStart = timeToMinutes(b.startTime);
-        const bEnd = timeToMinutes(b.endTime);
-        const currentSlotStart = startMins;
-        const currentSlotEnd = startMins + durationMinutes;
-
-        return currentSlotStart < bEnd && currentSlotEnd > bStart;
-      });
-
-      slots.push({
-        startTime: slotStart,
-        endTime: slotEnd,
-        label: `${slotStart} - ${slotEnd}`,
-        available: !overlappingBooking,
-        bookedBy: overlappingBooking?.customer?.name,
-      });
-
-      startMins += durationMinutes;
+      if (match) {
+        setInspectBooking(match);
+      }
+      return;
     }
 
-    return slots;
-  }, [
-    businessProfile?.businessHours,
-    businessProfile?.slotDurationMinutes,
-    courts,
-    selectedCourtId,
-    existingBookingsForDate,
-  ]);
-
-  // Update default price when slot or court changes
-  useEffect(() => {
-    if (selectedCourtId) {
-      const selectedCourt = courts.find((c) => c.courtId === selectedCourtId);
-      const price = selectedCourt?.pricePerHour || 800;
-      const duration = selectedCourt?.slotDurationMinutes || businessProfile?.slotDurationMinutes || 60;
-      const calculatedAmount = Math.round((price * duration) / 60);
-      setBookingAmount(String(calculatedAmount));
+    if (slot.isBlocked) {
+      // Prompt unblock
+      handleUnblockSlot(court.courtId, slot);
+      return;
     }
-  }, [selectedCourtId, courts, businessProfile?.slotDurationMinutes]);
 
-  // Handle slot click
-  const handleSelectSlot = (slot: TimeSlot) => {
-    if (!slot.available) return;
-    setSelectedSlot(slot);
-    setFormError(null);
+    // Available slot -> open manual booking pre-filled
+    setModalCourtId(court.courtId);
+    setModalSportId(court.sportId || businessCategories[0] || "cricket");
+    setModalDate(selectedDate);
+    setModalSlot(slot);
+    setBookingAmount(String(slot.price));
+    setModalError(null);
+    setShowNewBookingModal(true);
   };
 
-  // Submit manual booking
-  const handleSaveBooking = async (e: React.FormEvent) => {
+  // Open generic "+ New Booking" modal
+  const handleOpenGenericNewBooking = () => {
+    const firstCourt = activeCourts[0] || courts[0];
+    setModalCourtId(firstCourt.courtId);
+    setModalSportId(firstCourt.sportId || businessCategories[0] || "cricket");
+    setModalDate(selectedDate);
+    setModalSlot(null);
+    const duration = firstCourt.slotDurationMinutes || 60;
+    const price = firstCourt.pricePerHour || 800;
+    setBookingAmount(String(duration === 30 ? Math.round(price / 2) : price));
+    setModalError(null);
+    setShowNewBookingModal(true);
+  };
+
+  // Submit Manual Booking
+  const handleConfirmManualBooking = async (e: React.FormEvent) => {
     e.preventDefault();
-    setFormError(null);
+    setModalError(null);
 
-    if (!selectedSlot) {
-      setFormError("Please select an available time slot.");
+    if (!modalSlot) {
+      setModalError("Please select an available time slot.");
       return;
     }
     if (!customerName.trim()) {
-      setFormError("Customer / Player Name is required.");
+      setModalError("Customer name is required.");
       return;
     }
     if (!customerPhone.trim() || customerPhone.replace(/\D/g, "").length < 7) {
-      setFormError("Please provide a valid contact phone number.");
+      setModalError("Please enter a valid phone number.");
       return;
     }
     if (!businessProfile?.businessId || !user?.uid) {
-      setFormError("Business profile or session missing. Please refresh.");
+      setModalError("Session missing. Please refresh.");
       return;
     }
 
-    const currentCourt = courts.find((c) => c.courtId === selectedCourtId) || courts[0];
-    const sportObj = ALL_SPORTS_CATEGORIES.find((s) => s.id === bookingSportId);
-    const duration =
-      currentCourt?.slotDurationMinutes || businessProfile?.slotDurationMinutes || 60;
+    const targetCourt = courts.find((c) => c.courtId === modalCourtId) || courts[0];
+    const sportObj = ALL_SPORTS_CATEGORIES.find((s) => s.id === modalSportId);
 
     setSubmittingBooking(true);
+
     try {
-      await createManualBooking({
+      await bookSlotAtomically({
         businessId: businessProfile.businessId,
         ownerId: user.uid,
-        customer: {
-          userId: "",
-          name: customerName.trim(),
-          phone: customerPhone.trim(),
-          email: customerEmail.trim() || undefined,
-        },
-        sport: {
-          id: bookingSportId,
-          name: sportObj ? sportObj.name : bookingSportId,
-        },
-        court: {
-          courtId: currentCourt?.courtId || "default_court",
-          name: currentCourt?.name || "Main Court",
-        },
-        gameDate: bookingDate,
-        startTime: selectedSlot.startTime,
-        endTime: selectedSlot.endTime,
-        durationMinutes: duration,
+        courtId: targetCourt.courtId,
+        courtName: targetCourt.name,
+        sportId: targetCourt.sportId || modalSportId,
+        sportName: targetCourt.sportName || sportObj?.name || "Sport",
+        gameDate: modalDate,
+        startTime: modalSlot.startTime,
+        endTime: modalSlot.endTime,
+        durationMinutes: targetCourt.slotDurationMinutes || 60,
         playerCount: Number(playerCount) || 2,
-        pricing: {
-          subtotal: Number(bookingAmount) || 800,
-          discount: 0,
-          total: Number(bookingAmount) || 800,
-          currency: "INR",
-        },
-        bookingStatus: "confirmed",
-        payment: {
-          status: paymentStatus,
-          method: paymentMethod,
-        },
+        price: Number(bookingAmount) || targetCourt.pricePerHour || 800,
+        customerName: customerName.trim(),
+        customerPhone: customerPhone.trim(),
+        customerEmail: customerEmail.trim() || undefined,
+        playerId: "",
+        source: "owner",
+        paymentStatus,
+        paymentMethod,
       });
 
+      // Close modal and reset form
       setShowNewBookingModal(false);
-      // Reset form
       setCustomerName("");
       setCustomerPhone("");
       setCustomerEmail("");
-      setSelectedSlot(null);
+      setModalSlot(null);
     } catch (err: unknown) {
-      console.error("Booking creation failed:", err);
-      setFormError(err instanceof Error ? err.message : "Failed to create booking.");
+      console.error("Booking error:", err);
+      setModalError(
+        err instanceof Error
+          ? err.message
+          : "This slot was just booked. Please select another slot."
+      );
     } finally {
       setSubmittingBooking(false);
     }
   };
 
-  // Confirm booking action
-  const handleConfirmAction = async (bookingId: string) => {
+  // Block Slot Action
+  const handleConfirmBlock = async () => {
+    if (!blockingSlot || !businessProfile?.businessId || !user?.uid) return;
     setActionLoading(true);
+    setActionError(null);
+
+    const reason = blockReason === "Other" ? customReason.trim() || "Maintenance" : blockReason;
+
     try {
-      await confirmBooking(bookingId);
-      if (selectedBooking && selectedBooking.bookingId === bookingId) {
-        setSelectedBooking((prev) => (prev ? { ...prev, bookingStatus: "confirmed" } : null));
-      }
-    } catch (err) {
-      console.error("Confirm failed:", err);
+      await blockSlotAtomically({
+        businessId: businessProfile.businessId,
+        ownerId: user.uid,
+        courtId: blockingSlot.court.courtId,
+        courtName: blockingSlot.court.name,
+        gameDate: selectedDate,
+        startTime: blockingSlot.slot.startTime,
+        endTime: blockingSlot.slot.endTime,
+        reason,
+      });
+
+      setBlockingSlot(null);
+      setBlockReason("Maintenance");
+      setCustomReason("");
+    } catch (err: unknown) {
+      console.error("Block slot error:", err);
+      setActionError(err instanceof Error ? err.message : "Failed to block slot.");
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Cancel booking action
-  const handleCancelAction = async () => {
+  // Unblock Slot Action
+  const handleUnblockSlot = async (courtId: string, slot: GeneratedSlot) => {
+    const blockRec = dateBlockedSlots.find(
+      (b) =>
+        b.courtId === courtId &&
+        b.startTime === slot.startTime &&
+        b.gameDate === selectedDate
+    );
+    if (!blockRec) return;
+
+    setActionLoading(true);
+    setActionError(null);
+    try {
+      await unblockSlot(blockRec.blockId);
+    } catch (err: unknown) {
+      console.error("Unblock error:", err);
+      setActionError(err instanceof Error ? err.message : "Failed to unblock slot.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Cancel Booking Action
+  const handleConfirmCancellation = async () => {
     if (!cancelModalBooking) return;
     setActionLoading(true);
     try {
-      await cancelBooking(cancelModalBooking.bookingId, cancellationReason, "owner");
-      if (selectedBooking && selectedBooking.bookingId === cancelModalBooking.bookingId) {
-        setSelectedBooking((prev) =>
-          prev
-            ? {
-                ...prev,
-                bookingStatus: "cancelled",
-                cancellation: { reason: cancellationReason },
-              }
-            : null
-        );
-      }
+      await cancelBookingWithLock(cancelModalBooking.bookingId, cancellationReason, "owner");
       setCancelModalBooking(null);
+      if (inspectBooking?.bookingId === cancelModalBooking.bookingId) {
+        setInspectBooking(null);
+      }
     } catch (err) {
-      console.error("Cancel failed:", err);
+      console.error("Cancellation error:", err);
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Filter & Search bookings
+  // Complete Booking Action
+  const handleCompleteAction = async (bookingId: string) => {
+    setActionLoading(true);
+    try {
+      await markBookingCompleted(bookingId);
+      if (inspectBooking?.bookingId === bookingId) {
+        setInspectBooking((prev) => (prev ? { ...prev, bookingStatus: "completed", status: "completed" } : null));
+      }
+    } catch (err) {
+      console.error("Complete error:", err);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // No-show Action
+  const handleNoShowAction = async (bookingId: string) => {
+    setActionLoading(true);
+    try {
+      await markBookingNoShow(bookingId);
+      if (inspectBooking?.bookingId === bookingId) {
+        setInspectBooking((prev) => (prev ? { ...prev, bookingStatus: "no_show", status: "no_show" } : null));
+      }
+    } catch (err) {
+      console.error("No-show error:", err);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Tab counts for Table view
+  const tabCounts = useMemo(() => {
+    let todayCount = 0;
+    let upcomingCount = 0;
+    let pastCount = 0;
+    let cancelledCount = 0;
+
+    bookings.forEach((b) => {
+      if (b.bookingStatus === "cancelled") {
+        cancelledCount++;
+      } else if (b.gameDate === todayStr) {
+        todayCount++;
+      } else if (b.gameDate > todayStr) {
+        upcomingCount++;
+      } else {
+        pastCount++;
+      }
+    });
+
+    return {
+      all: bookings.length,
+      today: todayCount,
+      upcoming: upcomingCount,
+      past: pastCount,
+      cancelled: cancelledCount,
+    };
+  }, [bookings, todayStr]);
+
+  // Filtered bookings for Table view
   const filteredBookings = useMemo(() => {
     return bookings.filter((b) => {
-      // Search
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchName = b.customer?.name?.toLowerCase().includes(q);
         const matchPhone = b.customer?.phone?.includes(q);
         const matchSport = b.sport?.name?.toLowerCase().includes(q);
         const matchCourt = b.court?.name?.toLowerCase().includes(q);
-        if (!matchName && !matchPhone && !matchSport && !matchCourt) {
+        const matchId = b.readableId?.toLowerCase().includes(q) || b.bookingId.toLowerCase().includes(q);
+        if (!matchName && !matchPhone && !matchSport && !matchCourt && !matchId) {
           return false;
         }
       }
 
-      // Status
       if (statusFilter !== "all" && b.bookingStatus !== statusFilter) {
         return false;
       }
 
-      // Sport
-      if (selectedSportFilter !== "all" && b.sport?.id !== selectedSportFilter) {
+      if (viewTab === "today" && (b.gameDate !== todayStr || b.bookingStatus === "cancelled")) {
+        return false;
+      }
+      if (viewTab === "upcoming" && (b.gameDate <= todayStr || b.bookingStatus === "cancelled")) {
+        return false;
+      }
+      if (viewTab === "past" && (b.gameDate >= todayStr || b.bookingStatus === "cancelled")) {
+        return false;
+      }
+      if (viewTab === "cancelled" && b.bookingStatus !== "cancelled") {
         return false;
       }
 
       return true;
     });
-  }, [bookings, searchQuery, statusFilter, selectedSportFilter]);
+  }, [bookings, searchQuery, statusFilter, viewTab, todayStr]);
 
-  // Group bookings by TODAY, TOMORROW, and UPCOMING
-  const groupedBookings = useMemo(() => {
-    const today = new Date().toISOString().split("T")[0];
-    const tomorrowDate = new Date();
-    tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-    const tomorrow = tomorrowDate.toISOString().split("T")[0];
-
-    const todayItems: OwnerBooking[] = [];
-    const tomorrowItems: OwnerBooking[] = [];
-    const upcomingItems: OwnerBooking[] = [];
-    const pastItems: OwnerBooking[] = [];
-
-    filteredBookings.forEach((b) => {
-      if (b.gameDate === today) {
-        todayItems.push(b);
-      } else if (b.gameDate === tomorrow) {
-        tomorrowItems.push(b);
-      } else if (b.gameDate > tomorrow) {
-        upcomingItems.push(b);
-      } else {
-        pastItems.push(b);
-      }
-    });
-
-    return { todayItems, tomorrowItems, upcomingItems, pastItems };
-  }, [filteredBookings]);
+  // Slots for the Modal (when selecting a slot within the modal)
+  const modalGeneratedSlots = useMemo(() => {
+    if (!businessProfile) return [];
+    const court = courts.find((c) => c.courtId === modalCourtId) || courts[0];
+    const res = generateSlotsForCourt(
+      businessProfile,
+      court,
+      modalDate,
+      modalDate === selectedDate ? dateBookings : [],
+      undefined,
+      modalDate === selectedDate ? dateBlockedSlots : [],
+      modalDate === selectedDate ? dateSlotLocks : []
+    );
+    return res.slots;
+  }, [businessProfile, courts, modalCourtId, modalDate, selectedDate, dateBookings, dateBlockedSlots, dateSlotLocks]);
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
-      {/* Header */}
+    <div className="mx-auto max-w-7xl space-y-8 pb-16">
+      {/* HEADER */}
       <header className="flex flex-col gap-4 border-b border-white/8 pb-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <SectionLabel>Incoming Games</SectionLabel>
+          <SectionLabel>Booking Operations</SectionLabel>
           <h1 className="mt-2 font-display text-4xl text-qc-white md:text-5xl">
-            Bookings & Schedule
+            Bookings & Availability
           </h1>
           <p className="mt-1 text-sm text-qc-muted">
-            Manage upcoming games, inspect slot occupancy, and schedule reservations.
+            Inspect real-time court occupancy, schedule new reservations, and manage customer bookings.
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Toggle View: Grounds vs Table */}
+          <div className="flex items-center border border-white/10 bg-qc-panel p-1">
+            <button
+              onClick={() => setViewMode("grounds")}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition",
+                viewMode === "grounds"
+                  ? "bg-qc-lime text-qc-black font-bold"
+                  : "text-white/60 hover:text-white"
+              )}
+            >
+              <Grid3X3 className="h-3.5 w-3.5" />
+              <span>Grounds & Slots</span>
+            </button>
+            <button
+              onClick={() => setViewMode("table")}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition",
+                viewMode === "table"
+                  ? "bg-qc-lime text-qc-black font-bold"
+                  : "text-white/60 hover:text-white"
+              )}
+            >
+              <Layers className="h-3.5 w-3.5" />
+              <span>All Bookings ({bookings.length})</span>
+            </button>
+          </div>
+
           <Button
             type="button"
             variant="primary"
-            onClick={() => setShowNewBookingModal(true)}
+            onClick={handleOpenGenericNewBooking}
             className="gap-2"
           >
             <Plus className="h-4 w-4" />
@@ -471,334 +599,707 @@ export default function OwnerBookingsPage() {
         </div>
       </header>
 
-      {/* Control Bar: Search & Filters */}
-      <div className="flex flex-col gap-3 rounded-none border border-white/10 bg-qc-charcoal p-4 md:flex-row md:items-center md:justify-between">
-        {/* Search */}
-        <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by player name, phone, sport, or court..."
-            className="w-full border border-white/10 bg-qc-panel py-2 pl-9 pr-4 text-xs text-qc-white placeholder:text-white/30 focus:border-qc-lime focus:outline-none"
-          />
-          {searchQuery && (
-            <button
-              onClick={() => setSearchQuery("")}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          )}
-        </div>
+      {/* VIEW 1: GROUNDS & SLOTS SCHEDULE (PRIMARY CENTERPIECE) */}
+      {viewMode === "grounds" && (
+        <div className="space-y-8">
+          {/* Date Selector & Operating Info Bar */}
+          <div className="flex flex-col gap-4 border border-white/10 bg-qc-charcoal p-4 md:flex-row md:items-center md:justify-between">
+            {/* Date Navigator */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleStepDate(-1)}
+                className="flex h-9 w-9 items-center justify-center border border-white/10 bg-qc-panel text-white/70 hover:border-qc-lime hover:text-qc-white transition"
+                aria-label="Previous day"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
 
-        {/* Filter Dropdowns */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Sport filter */}
-          <div className="flex items-center gap-1.5 border border-white/10 bg-qc-panel px-3 py-1.5 text-xs text-white/70">
-            <Filter className="h-3 w-3 text-qc-lime" />
-            <select
-              value={selectedSportFilter}
-              onChange={(e) => setSelectedSportFilter(e.target.value)}
-              className="bg-transparent text-xs text-white focus:outline-none"
-            >
-              <option value="all" className="bg-qc-panel">
-                All Sports
-              </option>
-              {businessCategories.map((catId) => {
-                const s = ALL_SPORTS_CATEGORIES.find((item) => item.id === catId);
+              <div className="relative">
+                <input
+                  type="date"
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="border border-white/10 bg-qc-panel px-3 py-1.5 font-mono text-xs font-semibold text-qc-white focus:border-qc-lime focus:outline-none [color-scheme:dark]"
+                />
+              </div>
+
+              <button
+                onClick={() => handleStepDate(1)}
+                className="flex h-9 w-9 items-center justify-center border border-white/10 bg-qc-panel text-white/70 hover:border-qc-lime hover:text-qc-white transition"
+                aria-label="Next day"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+
+              <button
+                onClick={() => setSelectedDate(todayStr)}
+                className={cn(
+                  "ml-2 border px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition",
+                  selectedDate === todayStr
+                    ? "border-qc-lime bg-qc-lime/15 text-qc-lime"
+                    : "border-white/10 bg-qc-panel text-white/70 hover:border-qc-lime hover:text-qc-lime"
+                )}
+              >
+                Today
+              </button>
+
+              <button
+                onClick={() => {
+                  const tmrw = new Date(`${todayStr}T12:00:00`);
+                  tmrw.setDate(tmrw.getDate() + 1);
+                  setSelectedDate(tmrw.toISOString().split("T")[0]);
+                }}
+                className="border border-white/10 bg-qc-panel px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-white/70 hover:border-qc-lime hover:text-qc-lime transition"
+              >
+                Tomorrow
+              </button>
+            </div>
+
+            {/* Live Indicator & Legend */}
+            <div className="flex flex-wrap items-center gap-4 text-xs">
+              <div className="flex items-center gap-1.5 text-qc-muted">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-qc-lime opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-qc-lime"></span>
+                </span>
+                <span className="font-mono text-[11px] uppercase tracking-wider text-qc-lime">
+                  Real-time Sync
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3 text-[11px] text-white/60">
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 border border-white/20 bg-qc-panel" />
+                  <span>Available</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 border border-red-500/50 bg-red-500/20" />
+                  <span className="text-red-300">Booked</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="h-2.5 w-2.5 border border-amber-500/50 bg-amber-500/20" />
+                  <span className="text-amber-300">Blocked</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* GROUNDS LIST: Each ground with its dynamic slots */}
+          {loadingDate ? (
+            <div className="flex min-h-[300px] flex-col items-center justify-center border border-white/10 bg-qc-charcoal text-qc-muted">
+              <Loader2 className="h-6 w-6 animate-spin text-qc-lime" />
+              <p className="mt-2 text-xs uppercase tracking-wider">Syncing court availability...</p>
+            </div>
+          ) : activeCourts.length === 0 ? (
+            <div className="border border-white/10 bg-qc-charcoal p-12 text-center">
+              <Ban className="mx-auto h-8 w-8 text-white/30" />
+              <h3 className="mt-3 font-display text-xl text-qc-white">No Active Grounds</h3>
+              <p className="mt-1 text-xs text-qc-muted">
+                Add courts and configure operating hours in your Business Profile.
+              </p>
+              <Link
+                href="/owner/courts"
+                className="mt-4 inline-flex items-center gap-2 border border-qc-lime bg-qc-lime px-4 py-2 text-xs font-bold uppercase tracking-wider text-qc-black"
+              >
+                Configure Courts
+              </Link>
+            </div>
+          ) : (
+            <div className="space-y-8">
+              {activeCourts.map((court) => {
+                const res = generateSlotsForCourt(
+                  businessProfile || {
+                    businessId: "demo",
+                    ownerId: "demo",
+                    businessName: "Demo",
+                    owner: { name: "Demo Owner", phone: "", email: "" },
+                    categories: ["cricket"],
+                    location: { pinCode: "000000", country: "India" },
+                    onboardingCompleted: true,
+                  },
+                  court,
+                  selectedDate,
+                  dateBookings,
+                  undefined,
+                  dateBlockedSlots,
+                  dateSlotLocks
+                );
+
+                const courtSlots = res.slots;
+                const availableCount = courtSlots.filter((s) => s.isAvailable).length;
+                const bookedCount = courtSlots.filter((s) => s.isBooked).length;
+                const blockedCount = courtSlots.filter((s) => s.isBlocked).length;
+
                 return (
-                  <option key={catId} value={catId} className="bg-qc-panel">
-                    {s ? `${s.emoji} ${s.name}` : catId}
-                  </option>
+                  <div
+                    key={court.courtId}
+                    className="border border-white/10 bg-qc-charcoal overflow-hidden shadow-lg"
+                  >
+                    {/* Ground Header Card */}
+                    <div className="border-b border-white/10 bg-qc-panel/60 px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-3">
+                          <h2 className="font-display text-2xl text-qc-white">
+                            {court.name}
+                          </h2>
+                          <span className="border border-qc-lime/30 bg-qc-lime/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-qc-lime">
+                            {court.sportName || court.sportId || "Sport"}
+                          </span>
+                          {court.status === "maintenance" && (
+                            <span className="border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-300">
+                              Under Maintenance
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs text-qc-muted">
+                          {court.slotDurationMinutes || 60}-minute dynamic slots · {formatINR(court.pricePerHour || 800)}/hr
+                        </p>
+                      </div>
+
+                      {/* Ground Slot Stats */}
+                      <div className="flex items-center gap-4 text-xs font-mono">
+                        <span className="text-white/60">
+                          Total: <strong className="text-qc-white">{courtSlots.length}</strong>
+                        </span>
+                        <span className="text-emerald-400">
+                          Available: <strong>{availableCount}</strong>
+                        </span>
+                        <span className="text-red-400">
+                          Booked: <strong>{bookedCount}</strong>
+                        </span>
+                        {blockedCount > 0 && (
+                          <span className="text-amber-400">
+                            Blocked: <strong>{blockedCount}</strong>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Ground Slots Body */}
+                    <div className="p-5">
+                      {res.isClosed ? (
+                        <div className="border border-white/5 bg-qc-panel p-8 text-center text-xs text-qc-muted">
+                          <Ban className="mx-auto h-6 w-6 text-white/30 mb-2" />
+                          <p className="font-semibold text-white/80">{res.closureReason}</p>
+                        </div>
+                      ) : courtSlots.length === 0 ? (
+                        <div className="border border-white/5 bg-qc-panel p-8 text-center text-xs text-qc-muted">
+                          <Clock className="mx-auto h-6 w-6 text-white/30 mb-2" />
+                          <p className="font-semibold text-white/80">No remaining slots for today.</p>
+                          <p className="mt-1 text-[11px] text-white/50">Past time slots have expired.</p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                          {courtSlots.map((slot) => {
+                            const isBooked = slot.isBooked;
+                            const isBlocked = slot.isBlocked;
+                            const isAvailable = slot.isAvailable;
+
+                            return (
+                              <button
+                                key={slot.slotId}
+                                onClick={() => handleOpenSlotBooking(court, slot)}
+                                className={cn(
+                                  "group relative flex flex-col justify-between border p-3 text-left transition rounded-none",
+                                  isBooked
+                                    ? "border-red-500/40 bg-red-950/20 hover:border-red-400 hover:bg-red-950/35 cursor-pointer shadow-sm shadow-red-950/20"
+                                    : isBlocked
+                                    ? "border-amber-500/40 bg-amber-950/20 hover:border-amber-400 hover:bg-amber-950/35 cursor-pointer shadow-sm shadow-amber-950/20"
+                                    : "border-white/10 bg-qc-panel hover:border-qc-lime hover:bg-qc-lime/5 cursor-pointer"
+                                )}
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span
+                                    className={cn(
+                                      "font-mono text-xs font-bold",
+                                      isBooked
+                                        ? "text-red-300"
+                                        : isBlocked
+                                        ? "text-amber-300"
+                                        : "text-qc-white group-hover:text-qc-lime"
+                                    )}
+                                  >
+                                    {slot.startTime} – {slot.endTime}
+                                  </span>
+                                </div>
+
+                                <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2">
+                                  <div>
+                                    {isBooked ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-red-400">
+                                        <CheckCircle2 className="h-3 w-3 text-red-400" />
+                                        <span>BOOKED</span>
+                                      </span>
+                                    ) : isBlocked ? (
+                                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-400">
+                                        <Lock className="h-3 w-3" />
+                                        <span>BLOCKED</span>
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-qc-lime">
+                                        <span>AVAILABLE</span>
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <span className="text-[10px] font-mono text-white/50">
+                                    {formatINR(slot.price)}
+                                  </span>
+                                </div>
+
+                                {/* Customer name or block reason */}
+                                {isBooked && (
+                                  <div className="mt-1.5 truncate text-[11px] font-semibold text-white/90">
+                                    {slot.bookedBy || "Booked"}
+                                  </div>
+                                )}
+                                {isBlocked && (
+                                  <div className="mt-1.5 truncate text-[10px] text-amber-300/80">
+                                    {slot.blockReason || "Maintenance"}
+                                  </div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 );
               })}
-            </select>
-          </div>
-
-          {/* Status filter */}
-          <div className="flex items-center gap-1.5 border border-white/10 bg-qc-panel px-3 py-1.5 text-xs text-white/70">
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="bg-transparent text-xs text-white focus:outline-none"
-            >
-              <option value="all" className="bg-qc-panel">All Statuses</option>
-              <option value="confirmed" className="bg-qc-panel">Confirmed</option>
-              <option value="pending" className="bg-qc-panel">Pending</option>
-              <option value="completed" className="bg-qc-panel">Completed</option>
-              <option value="cancelled" className="bg-qc-panel">Cancelled</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Content Area */}
-      {loading ? (
-        <div className="flex min-h-[300px] flex-col items-center justify-center border border-white/10 bg-qc-charcoal py-16 text-center">
-          <Loader2 className="h-8 w-8 animate-spin text-qc-lime" />
-          <p className="mt-3 text-sm text-qc-muted">Syncing venue bookings...</p>
-        </div>
-      ) : filteredBookings.length === 0 ? (
-        /* Empty State */
-        <div className="flex min-h-[320px] flex-col items-center justify-center border border-white/10 bg-qc-charcoal p-8 text-center">
-          <div className="flex h-14 w-14 items-center justify-center border border-white/10 bg-qc-panel text-white/40">
-            <CalendarCheck className="h-7 w-7" />
-          </div>
-          <h3 className="mt-4 font-display text-2xl text-qc-white">
-            {searchQuery || statusFilter !== "all" || selectedSportFilter !== "all"
-              ? "No matching bookings found"
-              : "No upcoming games scheduled"}
-          </h3>
-          <p className="mt-1.5 max-w-md text-xs text-qc-muted leading-relaxed">
-            {searchQuery || statusFilter !== "all"
-              ? "Try resetting your search filter to see all active venue bookings."
-              : "When players book slots via QuickCourt or you manually schedule bookings, they will appear here with live game schedules and payment details."}
-          </p>
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={() => setShowNewBookingModal(true)}
-            size="sm"
-            className="mt-6 gap-2"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Create First Booking</span>
-          </Button>
-        </div>
-      ) : (
-        /* Grouped Bookings Display */
-        <div className="space-y-8">
-          {/* TODAY */}
-          {groupedBookings.todayItems.length > 0 && (
-            <BookingSection
-              title="Today's Games"
-              count={groupedBookings.todayItems.length}
-              items={groupedBookings.todayItems}
-              format12h={format12h}
-              onSelect={setSelectedBooking}
-            />
-          )}
-
-          {/* TOMORROW */}
-          {groupedBookings.tomorrowItems.length > 0 && (
-            <BookingSection
-              title="Tomorrow"
-              count={groupedBookings.tomorrowItems.length}
-              items={groupedBookings.tomorrowItems}
-              format12h={format12h}
-              onSelect={setSelectedBooking}
-            />
-          )}
-
-          {/* UPCOMING */}
-          {groupedBookings.upcomingItems.length > 0 && (
-            <BookingSection
-              title="Upcoming Days"
-              count={groupedBookings.upcomingItems.length}
-              items={groupedBookings.upcomingItems}
-              format12h={format12h}
-              onSelect={setSelectedBooking}
-            />
-          )}
-
-          {/* PAST */}
-          {groupedBookings.pastItems.length > 0 && (
-            <BookingSection
-              title="Past Games"
-              count={groupedBookings.pastItems.length}
-              items={groupedBookings.pastItems}
-              format12h={format12h}
-              onSelect={setSelectedBooking}
-              isPast
-            />
+            </div>
           )}
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* MODAL 1: NEW INTERACTIVE SLOT BOOKING MODAL */}
-      {/* ========================================================== */}
-      {showNewBookingModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm overflow-y-auto">
-          <div className="relative w-full max-w-3xl border border-white/15 bg-qc-charcoal p-6 sm:p-8 space-y-6 my-8">
+      {/* VIEW 2: ALL BOOKINGS LIST TABLE */}
+      {viewMode === "table" && (
+        <div className="space-y-6">
+          {/* Tabs */}
+          <div className="border-b border-white/10 flex items-center gap-6 overflow-x-auto pb-px">
+            <button
+              onClick={() => setViewTab("all")}
+              className={cn(
+                "pb-3 text-xs font-bold uppercase tracking-[0.16em] transition border-b-2 flex items-center gap-2 whitespace-nowrap",
+                viewTab === "all"
+                  ? "border-qc-lime text-qc-lime"
+                  : "border-transparent text-white/60 hover:text-white"
+              )}
+            >
+              All ({tabCounts.all})
+            </button>
+            <button
+              onClick={() => setViewTab("today")}
+              className={cn(
+                "pb-3 text-xs font-bold uppercase tracking-[0.16em] transition border-b-2 flex items-center gap-2 whitespace-nowrap",
+                viewTab === "today"
+                  ? "border-qc-lime text-qc-lime"
+                  : "border-transparent text-white/60 hover:text-white"
+              )}
+            >
+              Today ({tabCounts.today})
+            </button>
+            <button
+              onClick={() => setViewTab("upcoming")}
+              className={cn(
+                "pb-3 text-xs font-bold uppercase tracking-[0.16em] transition border-b-2 flex items-center gap-2 whitespace-nowrap",
+                viewTab === "upcoming"
+                  ? "border-qc-lime text-qc-lime"
+                  : "border-transparent text-white/60 hover:text-white"
+              )}
+            >
+              Upcoming ({tabCounts.upcoming})
+            </button>
+            <button
+              onClick={() => setViewTab("past")}
+              className={cn(
+                "pb-3 text-xs font-bold uppercase tracking-[0.16em] transition border-b-2 flex items-center gap-2 whitespace-nowrap",
+                viewTab === "past"
+                  ? "border-qc-lime text-qc-lime"
+                  : "border-transparent text-white/60 hover:text-white"
+              )}
+            >
+              Past ({tabCounts.past})
+            </button>
+            <button
+              onClick={() => setViewTab("cancelled")}
+              className={cn(
+                "pb-3 text-xs font-bold uppercase tracking-[0.16em] transition border-b-2 flex items-center gap-2 whitespace-nowrap",
+                viewTab === "cancelled"
+                  ? "border-qc-lime text-qc-lime"
+                  : "border-transparent text-white/60 hover:text-white"
+              )}
+            >
+              Cancelled ({tabCounts.cancelled})
+            </button>
+          </div>
+
+          {/* Search Bar */}
+          <div className="flex flex-col gap-3 border border-white/10 bg-qc-charcoal p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search by player name, phone, sport, court, or booking ID..."
+                className="w-full border border-white/10 bg-qc-panel py-2 pl-9 pr-4 text-xs text-qc-white placeholder:text-white/30 focus:border-qc-lime focus:outline-none"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="border border-white/10 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+            >
+              <option value="all">All Statuses</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="completed">Completed</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="no_show">No Show</option>
+            </select>
+          </div>
+
+          {/* Bookings Table */}
+          {loadingAll ? (
+            <div className="flex min-h-[300px] items-center justify-center border border-white/10 bg-qc-charcoal">
+              <Loader2 className="h-5 w-5 animate-spin text-qc-lime" />
+            </div>
+          ) : filteredBookings.length === 0 ? (
+            <div className="border border-white/10 bg-qc-charcoal p-12 text-center text-xs text-qc-muted">
+              <Ticket className="mx-auto h-8 w-8 text-white/30 mb-2" />
+              <p className="font-semibold text-white/80">No bookings match your search or filter.</p>
+            </div>
+          ) : (
+            <div className="border border-white/10 bg-qc-charcoal overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-white/10 bg-qc-panel text-[10px] uppercase tracking-wider text-qc-muted">
+                  <tr>
+                    <th className="p-3.5">Booking ID</th>
+                    <th className="p-3.5">Player / Customer</th>
+                    <th className="p-3.5">Ground & Sport</th>
+                    <th className="p-3.5">Date & Time</th>
+                    <th className="p-3.5">Amount</th>
+                    <th className="p-3.5">Status</th>
+                    <th className="p-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {filteredBookings.map((b) => (
+                    <tr
+                      key={b.bookingId}
+                      className="hover:bg-white/5 transition cursor-pointer"
+                      onClick={() => setInspectBooking(b)}
+                    >
+                      <td className="p-3.5 font-mono text-qc-lime font-bold">
+                        {b.readableId || b.bookingId}
+                      </td>
+                      <td className="p-3.5">
+                        <div className="font-semibold text-qc-white">{b.customer.name}</div>
+                        <div className="font-mono text-[11px] text-white/50">{b.customer.phone}</div>
+                      </td>
+                      <td className="p-3.5">
+                        <div className="text-qc-white font-medium">{b.court.name}</div>
+                        <div className="text-[10px] uppercase tracking-wider text-white/40">{b.sport.name}</div>
+                      </td>
+                      <td className="p-3.5">
+                        <div className="font-mono text-qc-white">{b.gameDate}</div>
+                        <div className="font-mono text-[11px] text-white/50">{b.startTime} – {b.endTime}</div>
+                      </td>
+                      <td className="p-3.5 font-bold text-qc-white">
+                        {formatINR(b.pricing?.total || b.price || 0)}
+                      </td>
+                      <td className="p-3.5">
+                        <span
+                          className={cn(
+                            "px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border",
+                            b.bookingStatus === "confirmed"
+                              ? "border-qc-lime/40 bg-qc-lime/10 text-qc-lime"
+                              : b.bookingStatus === "cancelled"
+                              ? "border-red-500/40 bg-red-500/10 text-red-400"
+                              : b.bookingStatus === "completed"
+                              ? "border-blue-500/40 bg-blue-500/10 text-blue-300"
+                              : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+                          )}
+                        >
+                          {b.bookingStatus}
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-right" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => setInspectBooking(b)}
+                          className="px-2.5 py-1 text-[11px] text-qc-lime hover:underline"
+                        >
+                          Details →
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* INSPECT BOOKING DETAILS DRAWER (PROMPT REQUIREMENT #5 & #22) */}
+      {inspectBooking && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setInspectBooking(null)}
+        >
+          <div
+            className="w-full max-w-lg border border-white/15 bg-qc-charcoal p-6 space-y-6 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             {/* Header */}
-            <div className="flex items-start justify-between border-b border-white/10 pb-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-4">
               <div>
-                <span className="text-[10px] uppercase tracking-[0.2em] text-qc-lime font-medium">
-                  Direct Slot Reservation
-                </span>
-                <h3 className="font-display text-2xl text-qc-white sm:text-3xl">
-                  Schedule New Booking
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider border",
+                      inspectBooking.bookingStatus === "confirmed"
+                        ? "border-red-500/40 bg-red-500/15 text-red-300"
+                        : inspectBooking.bookingStatus === "cancelled"
+                        ? "border-white/20 bg-white/5 text-white/40"
+                        : "border-qc-lime/40 bg-qc-lime/15 text-qc-lime"
+                    )}
+                  >
+                    {inspectBooking.bookingStatus === "confirmed" ? "BOOKED" : inspectBooking.bookingStatus.toUpperCase()}
+                  </span>
+                  <span className="font-mono text-xs text-qc-muted">
+                    {inspectBooking.source === "owner" ? "Owner Manual Booking" : "Player Online Booking"}
+                  </span>
+                </div>
+                <h3 className="mt-1 font-display text-2xl text-qc-white">
+                  {inspectBooking.readableId || inspectBooking.bookingId}
                 </h3>
-                <p className="mt-0.5 text-xs text-qc-muted">
-                  Select sport, court, and available time slot based on your business profile.
-                </p>
               </div>
+
               <button
-                type="button"
-                onClick={() => setShowNewBookingModal(false)}
-                className="text-white/40 hover:text-white transition p-1"
+                onClick={() => setInspectBooking(null)}
+                className="text-white/40 hover:text-white"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            {formError && (
+            {/* Information Grid */}
+            <div className="space-y-4 text-xs">
+              {/* Customer Info Card */}
+              <div className="border border-white/10 bg-qc-panel p-4 space-y-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-qc-lime block">
+                  Customer Information
+                </span>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Player Name:</span>
+                  <span className="font-semibold text-qc-white">{inspectBooking.customer.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Phone Number:</span>
+                  <span className="font-mono text-qc-white">{inspectBooking.customer.phone}</span>
+                </div>
+                {inspectBooking.customer.email && (
+                  <div className="flex justify-between">
+                    <span className="text-qc-muted">Email:</span>
+                    <span className="text-white/80">{inspectBooking.customer.email}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Reservation Info Card */}
+              <div className="border border-white/10 bg-qc-panel p-4 space-y-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-qc-lime block">
+                  Ground & Slot Details
+                </span>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Ground:</span>
+                  <span className="font-semibold text-qc-white">{inspectBooking.court.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Sport:</span>
+                  <span className="text-qc-white">{inspectBooking.sport.name}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Date:</span>
+                  <span className="font-mono font-semibold text-qc-white">{inspectBooking.gameDate}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Time Slot:</span>
+                  <span className="font-mono font-bold text-qc-lime">
+                    {format12Hour(inspectBooking.startTime)} – {format12Hour(inspectBooking.endTime)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Amount:</span>
+                  <span className="font-bold text-qc-white">
+                    {formatINR(inspectBooking.pricing?.total || inspectBooking.price || 0)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-qc-muted">Payment:</span>
+                  <span className="uppercase tracking-wider font-semibold text-qc-lime">
+                    {inspectBooking.payment.status} ({inspectBooking.payment.method || "cash"})
+                  </span>
+                </div>
+              </div>
+
+              {/* Cancellation Reason if cancelled */}
+              {inspectBooking.bookingStatus === "cancelled" && inspectBooking.cancellation && (
+                <div className="border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+                  <span className="font-bold">Cancellation Reason: </span>
+                  <span>{inspectBooking.cancellation.reason}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            {inspectBooking.bookingStatus === "confirmed" && (
+              <div className="border-t border-white/10 pt-4 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <button
+                    onClick={() => {
+                      setCancelModalBooking(inspectBooking);
+                    }}
+                    disabled={actionLoading}
+                    className="flex-1 border border-red-500/30 bg-red-500/10 py-2 text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-500/20 transition"
+                  >
+                    Cancel Booking
+                  </button>
+
+                  <button
+                    onClick={() => handleCompleteAction(inspectBooking.bookingId)}
+                    disabled={actionLoading}
+                    className="flex-1 border border-white/10 bg-qc-panel py-2 text-xs font-semibold uppercase tracking-wider text-qc-white hover:border-qc-lime transition"
+                  >
+                    Mark Completed
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MANUAL NEW BOOKING MODAL (OWNER CREATES BOOKING) */}
+      {showNewBookingModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setShowNewBookingModal(false)}
+        >
+          <div
+            className="w-full max-w-xl border border-white/15 bg-qc-charcoal p-6 space-y-6 max-h-[92vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-4">
+              <div>
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-qc-lime">
+                  Owner Reservation
+                </span>
+                <h3 className="mt-1 font-display text-2xl text-qc-white">
+                  Create Booking
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowNewBookingModal(false)}
+                className="text-white/40 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {modalError && (
               <div className="flex items-center gap-2 border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
                 <AlertTriangle className="h-4 w-4 shrink-0 text-red-400" />
-                <span>{formError}</span>
+                <span>{modalError}</span>
               </div>
             )}
 
-            <form onSubmit={handleSaveBooking} className="space-y-6">
-              {/* STEP 1: Date & Sport (Restricted to Business Profile categories) */}
+            <form onSubmit={handleConfirmManualBooking} className="space-y-6">
+              {/* Step 1: Select Ground & Date */}
               <div className="grid gap-4 sm:grid-cols-2">
-                {/* Date Picker */}
                 <div>
-                  <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted">
-                    Game Date *
+                  <label className="block text-xs uppercase tracking-wider text-qc-muted mb-1.5">
+                    Select Ground *
                   </label>
-                  <div className="mt-1.5 flex items-center border border-white/15 bg-qc-panel px-3 py-2.5 focus-within:border-qc-lime">
-                    <Calendar className="mr-2 h-4 w-4 text-white/40" />
-                    <input
-                      type="date"
-                      value={bookingDate}
-                      onChange={(e) => setBookingDate(e.target.value)}
-                      className="w-full bg-transparent font-mono text-xs text-qc-white focus:outline-none [color-scheme:dark]"
-                      required
-                    />
-                  </div>
-                </div>
-
-                {/* Sport Dropdown (Owner's categories ONLY) */}
-                <div>
-                  <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted">
-                    Sport Option *
-                  </label>
-                  <div className="mt-1.5 border border-white/15 bg-qc-panel px-3 py-2.5 focus-within:border-qc-lime">
-                    <select
-                      value={bookingSportId}
-                      onChange={(e) => handleSportChange(e.target.value)}
-                      className="w-full bg-transparent text-xs text-qc-white focus:outline-none"
-                    >
-                      {businessCategories.length === 0 ? (
-                        <option value="cricket" className="bg-qc-panel text-white">
-                          Cricket (Add in Business Profile)
-                        </option>
-                      ) : (
-                        businessCategories.map((catId) => {
-                          const s = ALL_SPORTS_CATEGORIES.find((item) => item.id === catId);
-                          return (
-                            <option key={catId} value={catId} className="bg-qc-panel text-white">
-                              {s ? `${s.emoji} ${s.name}` : catId}
-                            </option>
-                          );
-                        })
-                      )}
-                    </select>
-                  </div>
-                </div>
-              </div>
-
-              {/* STEP 2: Court / Ground Selection */}
-              <div>
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs uppercase tracking-[0.14em] text-qc-muted">
-                    Select Court / Ground *
-                  </label>
-                  <Link
-                    href="/owner/business-profile"
-                    className="text-[11px] text-qc-lime hover:underline"
+                  <select
+                    value={modalCourtId}
+                    onChange={(e) => {
+                      setModalCourtId(e.target.value);
+                      setModalSlot(null);
+                    }}
+                    className="w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
                   >
-                    + Manage Courts in Profile
-                  </Link>
+                    {activeCourts.map((c) => (
+                      <option key={c.courtId} value={c.courtId} className="bg-qc-panel text-white">
+                        {c.name} ({c.sportName || c.sportId})
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
-                <div className="mt-2 grid gap-2.5 sm:grid-cols-3">
-                  {courts.map((court) => {
-                    const isSelected = selectedCourtId === court.courtId;
-                    return (
-                      <button
-                        type="button"
-                        key={court.courtId}
-                        onClick={() => {
-                          setSelectedCourtId(court.courtId);
-                          setSelectedSlot(null);
-                        }}
-                        className={`flex flex-col items-start border p-3 text-left transition ${
-                          isSelected
-                            ? "border-qc-lime bg-qc-lime/15 text-qc-white"
-                            : "border-white/10 bg-qc-panel text-white/70 hover:border-white/20"
-                        }`}
-                      >
-                        <span className="font-medium text-xs text-qc-white">
-                          {court.name}
-                        </span>
-                        <span className="mt-1 font-mono text-[10px] text-qc-muted">
-                          ₹{court.pricePerHour}/hr · {court.slotDurationMinutes || 60} min
-                        </span>
-                      </button>
-                    );
-                  })}
+                <div>
+                  <label className="block text-xs uppercase tracking-wider text-qc-muted mb-1.5">
+                    Date *
+                  </label>
+                  <input
+                    type="date"
+                    value={modalDate}
+                    onChange={(e) => {
+                      setModalDate(e.target.value);
+                      setModalSlot(null);
+                    }}
+                    className="w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none [color-scheme:dark]"
+                    required
+                  />
                 </div>
               </div>
 
-              {/* STEP 3: Time Slot Grid (Interactive Available vs Booked) */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Clock className="h-4 w-4 text-qc-lime" />
-                    <label className="text-xs uppercase tracking-[0.14em] text-qc-muted">
-                      Time Slots · Operating Hours ({businessProfile?.businessHours?.startTime || "08:00"} - {businessProfile?.businessHours?.endTime || "22:00"})
-                    </label>
-                  </div>
-                  <span className="text-[11px] font-mono text-qc-muted">
-                    {selectedSlot ? `Selected: ${selectedSlot.label}` : "Click any slot"}
-                  </span>
-                </div>
-
-                {loadingSlots ? (
-                  <div className="flex items-center justify-center border border-white/10 bg-qc-panel p-6">
-                    <Loader2 className="h-5 w-5 animate-spin text-qc-lime" />
-                    <span className="ml-2 text-xs text-qc-muted">Checking slot availability...</span>
+              {/* Step 2: Time Slots */}
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-qc-muted mb-2">
+                  Select Available Slot *
+                </label>
+                {modalGeneratedSlots.length === 0 ? (
+                  <div className="border border-white/10 bg-qc-panel p-4 text-center text-xs text-qc-muted">
+                    No slots available on this date or past slots have expired.
                   </div>
                 ) : (
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 max-h-56 overflow-y-auto pr-1">
-                    {generatedSlots.map((slot) => {
-                      const isSelected =
-                        selectedSlot?.startTime === slot.startTime &&
-                        selectedSlot?.endTime === slot.endTime;
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-48 overflow-y-auto pr-1">
+                    {modalGeneratedSlots.map((slot) => {
+                      const isSelected = modalSlot?.slotId === slot.slotId;
+                      const isAvailable = slot.isAvailable;
 
                       return (
                         <button
+                          key={slot.slotId}
                           type="button"
-                          key={slot.label}
-                          disabled={!slot.available}
-                          onClick={() => handleSelectSlot(slot)}
-                          className={`flex flex-col items-center justify-center border p-2.5 text-center transition ${
-                            !slot.available
-                              ? "border-white/5 bg-white/5 text-white/25 cursor-not-allowed"
-                              : isSelected
-                              ? "border-qc-lime bg-qc-lime text-qc-black shadow-[0_0_12px_rgba(200,245,66,0.3)] font-semibold"
-                              : "border-white/10 bg-qc-panel text-white hover:border-qc-lime/60 hover:text-qc-lime"
-                          }`}
+                          disabled={!isAvailable}
+                          onClick={() => {
+                            if (isAvailable) setModalSlot(slot);
+                          }}
+                          className={cn(
+                            "p-2 text-center text-xs font-mono border transition",
+                            isSelected
+                              ? "border-qc-lime bg-qc-lime text-qc-black font-bold shadow-md"
+                              : isAvailable
+                              ? "border-white/10 bg-qc-panel text-white hover:border-qc-lime/50"
+                              : "border-white/5 bg-white/5 text-white/30 cursor-not-allowed"
+                          )}
                         >
-                          <span className="font-mono text-xs tracking-tight">
-                            {slot.label}
-                          </span>
-                          <span
-                            className={`mt-1 text-[9px] uppercase tracking-wider ${
-                              !slot.available
-                                ? "text-red-400/80"
-                                : isSelected
-                                ? "text-qc-black font-bold"
-                                : "text-emerald-400"
-                            }`}
-                          >
-                            {!slot.available ? "Booked" : "Available"}
-                          </span>
+                          <div>{slot.startTime} – {slot.endTime}</div>
+                          <div className="text-[9px] uppercase mt-0.5">
+                            {slot.isBooked ? "Booked" : slot.isBlocked ? "Blocked" : formatINR(slot.price)}
+                          </div>
                         </button>
                       );
                     })}
@@ -806,141 +1307,95 @@ export default function OwnerBookingsPage() {
                 )}
               </div>
 
-              {/* STEP 4: Customer Details & Payment */}
-              <div className="border-t border-white/10 pt-5 space-y-4">
-                <span className="text-[10px] uppercase tracking-[0.16em] text-qc-lime font-medium">
-                  Player & Payment Information
+              {/* Step 3: Customer Information */}
+              <div className="space-y-4 border-t border-white/10 pt-4">
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-qc-lime block">
+                  Customer Details
                 </span>
 
-                <div className="grid gap-4 sm:grid-cols-3">
-                  {/* Customer Name */}
+                <div className="grid gap-3 sm:grid-cols-2">
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Customer Name *
-                    </label>
-                    <div className="mt-1 flex items-center border border-white/15 bg-qc-panel px-2.5 py-2">
-                      <User className="mr-2 h-3.5 w-3.5 text-white/40" />
-                      <input
-                        type="text"
-                        value={customerName}
-                        onChange={(e) => setCustomerName(e.target.value)}
-                        placeholder="John Doe"
-                        className="w-full bg-transparent text-xs text-qc-white focus:outline-none"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  {/* Customer Phone */}
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Phone Number *
-                    </label>
-                    <div className="mt-1 flex items-center border border-white/15 bg-qc-panel px-2.5 py-2">
-                      <Phone className="mr-2 h-3.5 w-3.5 text-white/40" />
-                      <input
-                        type="tel"
-                        value={customerPhone}
-                        onChange={(e) => setCustomerPhone(e.target.value)}
-                        placeholder="+91 98765 43210"
-                        className="w-full bg-transparent text-xs text-qc-white focus:outline-none"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  {/* Players Count */}
-                  <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Player Count
-                    </label>
+                    <label className="block text-xs text-white/70 mb-1">Customer / Player Name *</label>
                     <input
-                      type="number"
-                      min="1"
-                      max="50"
-                      value={playerCount}
-                      onChange={(e) => setPlayerCount(e.target.value)}
-                      className="mt-1 w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                      type="text"
+                      placeholder="e.g. Rahul Patel"
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                      className="w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                      required
                     />
                   </div>
 
-                  {/* Booking Total */}
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Booking Amount (₹)
-                    </label>
+                    <label className="block text-xs text-white/70 mb-1">Mobile Phone Number *</label>
+                    <input
+                      type="tel"
+                      placeholder="e.g. 9876543210"
+                      value={customerPhone}
+                      onChange={(e) => setCustomerPhone(e.target.value)}
+                      className="w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label className="block text-xs text-white/70 mb-1">Amount (₹)</label>
                     <input
                       type="number"
                       value={bookingAmount}
                       onChange={(e) => setBookingAmount(e.target.value)}
-                      className="mt-1 w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+                      className="w-full border border-white/15 bg-qc-panel px-3 py-2 font-mono text-xs text-qc-white focus:border-qc-lime focus:outline-none"
                     />
                   </div>
 
-                  {/* Payment Status */}
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Payment Status
-                    </label>
+                    <label className="block text-xs text-white/70 mb-1">Payment Status</label>
                     <select
                       value={paymentStatus}
-                      onChange={(e) => setPaymentStatus(e.target.value as "paid" | "pending")}
-                      className="mt-1 w-full border border-white/15 bg-qc-panel px-2.5 py-2 text-xs text-qc-white focus:outline-none"
+                      onChange={(e) => setPaymentStatus(e.target.value as PaymentStatus)}
+                      className="w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
                     >
                       <option value="paid" className="bg-qc-panel">Paid</option>
                       <option value="pending" className="bg-qc-panel">Pending</option>
                     </select>
                   </div>
 
-                  {/* Payment Method */}
                   <div>
-                    <label className="block text-[10px] uppercase tracking-wider text-qc-muted">
-                      Payment Method
-                    </label>
+                    <label className="block text-xs text-white/70 mb-1">Payment Method</label>
                     <select
                       value={paymentMethod}
-                      onChange={(e) =>
-                        setPaymentMethod(e.target.value as "cash" | "upi" | "card" | "offline")
-                      }
-                      className="mt-1 w-full border border-white/15 bg-qc-panel px-2.5 py-2 text-xs text-qc-white focus:outline-none"
+                      onChange={(e) => setPaymentMethod(e.target.value as any)}
+                      className="w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
                     >
                       <option value="cash" className="bg-qc-panel">Cash</option>
                       <option value="upi" className="bg-qc-panel">UPI</option>
                       <option value="card" className="bg-qc-panel">Card</option>
-                      <option value="offline" className="bg-qc-panel">Offline / Pay at Venue</option>
+                      <option value="offline" className="bg-qc-panel">Offline</option>
                     </select>
                   </div>
                 </div>
               </div>
 
-              {/* Action Buttons */}
+              {/* Submit Buttons */}
               <div className="flex items-center justify-end gap-3 border-t border-white/10 pt-4">
-                <Button
+                <button
                   type="button"
-                  variant="secondary"
-                  size="sm"
                   onClick={() => setShowNewBookingModal(false)}
+                  className="px-4 py-2 text-xs uppercase tracking-wider text-white/60 hover:text-white"
                 >
                   Cancel
-                </Button>
+                </button>
+
                 <Button
                   type="submit"
                   variant="primary"
-                  size="md"
-                  disabled={submittingBooking || !selectedSlot}
+                  disabled={submittingBooking || !modalSlot}
                   className="gap-2"
                 >
-                  {submittingBooking ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      <span>Confirming...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="h-4 w-4 text-qc-black" />
-                      <span>Confirm & Reserve Slot</span>
-                    </>
-                  )}
+                  {submittingBooking && <Loader2 className="h-4 w-4 animate-spin" />}
+                  <span>Confirm Booking</span>
                 </Button>
               </div>
             </form>
@@ -948,300 +1403,62 @@ export default function OwnerBookingsPage() {
         </div>
       )}
 
-      {/* ========================================================== */}
-      {/* DRAWER / DETAILS MODAL: VIEW BOOKING */}
-      {/* ========================================================== */}
-      {selectedBooking && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
-          <div className="relative w-full max-w-lg border border-white/15 bg-qc-charcoal p-6 sm:p-7 space-y-6">
-            <div className="flex items-start justify-between border-b border-white/10 pb-4">
-              <div>
-                <span className="text-[10px] uppercase tracking-[0.2em] text-qc-lime font-medium">
-                  Booking Reference
-                </span>
-                <h3 className="font-display text-2xl text-qc-white">
-                  {selectedBooking.customer?.name || "Player"}
-                </h3>
-                <p className="text-xs text-qc-muted font-mono">{selectedBooking.bookingId}</p>
-              </div>
+      {/* CANCEL BOOKING MODAL */}
+      {cancelModalBooking && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => setCancelModalBooking(null)}
+        >
+          <div
+            className="w-full max-w-md border border-white/15 bg-qc-charcoal p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <h3 className="font-display text-xl text-qc-white">Confirm Cancellation</h3>
               <button
-                onClick={() => setSelectedBooking(null)}
+                onClick={() => setCancelModalBooking(null)}
                 className="text-white/40 hover:text-white"
               >
-                <X className="h-5 w-5" />
+                <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="space-y-4 text-xs">
-              {/* Game Schedule */}
-              <div className="border border-white/10 bg-qc-panel p-3.5 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-qc-muted">Sport & Court:</span>
-                  <span className="text-qc-white font-medium">
-                    {selectedBooking.sport?.name} · {selectedBooking.court?.name}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-qc-muted">Date:</span>
-                  <span className="text-qc-white font-mono">{selectedBooking.gameDate}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-qc-muted">Time Slot:</span>
-                  <span className="text-qc-lime font-mono">
-                    {format12h(selectedBooking.startTime)} - {format12h(selectedBooking.endTime)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-qc-muted">Players:</span>
-                  <span className="text-qc-white">{selectedBooking.playerCount}</span>
-                </div>
-              </div>
-
-              {/* Customer Contact */}
-              <div className="border border-white/10 bg-qc-panel p-3.5 space-y-2">
-                <div className="flex justify-between">
-                  <span className="text-qc-muted">Phone:</span>
-                  <span className="text-qc-white font-mono">
-                    {selectedBooking.customer?.phone || "N/A"}
-                  </span>
-                </div>
-                {selectedBooking.customer?.email && (
-                  <div className="flex justify-between">
-                    <span className="text-qc-muted">Email:</span>
-                    <span className="text-qc-white">{selectedBooking.customer.email}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Pricing & Status */}
-              <div className="border border-white/10 bg-qc-panel p-3.5 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-qc-muted">Booking Status:</span>
-                  <span
-                    className={`px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold ${
-                      selectedBooking.bookingStatus === "confirmed"
-                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-                        : selectedBooking.bookingStatus === "cancelled"
-                        ? "bg-red-500/10 text-red-400 border border-red-500/30"
-                        : "bg-amber-500/10 text-amber-400 border border-amber-500/30"
-                    }`}
-                  >
-                    {selectedBooking.bookingStatus}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-qc-muted">Payment:</span>
-                  <span className="font-mono text-qc-white">
-                    {selectedBooking.payment?.status?.toUpperCase()} ({selectedBooking.payment?.method || "cash"})
-                  </span>
-                </div>
-                <div className="flex justify-between items-center pt-2 border-t border-white/5">
-                  <span className="text-qc-white font-medium">Total Amount:</span>
-                  <span className="font-display text-xl text-qc-lime">
-                    {formatINR(selectedBooking.pricing?.total || 0)}
-                  </span>
-                </div>
-              </div>
-
-              {/* Cancellation detail */}
-              {selectedBooking.cancellation && (
-                <div className="border border-red-500/20 bg-red-500/5 p-3 text-red-300">
-                  <span className="font-semibold block">Cancelled:</span>
-                  <span className="italic">{selectedBooking.cancellation.reason}</span>
-                </div>
-              )}
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center justify-between border-t border-white/10 pt-4">
-              {selectedBooking.bookingStatus !== "cancelled" ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setCancelModalBooking(selectedBooking);
-                  }}
-                  className="text-red-400 border-red-500/30 hover:bg-red-500/10"
-                >
-                  Cancel Booking
-                </Button>
-              ) : (
-                <span className="text-xs text-red-400">Booking has been cancelled</span>
-              )}
-
-              {selectedBooking.bookingStatus === "pending" && (
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  disabled={actionLoading}
-                  onClick={() => handleConfirmAction(selectedBooking.bookingId)}
-                >
-                  Confirm Game
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================== */}
-      {/* MODAL 3: CANCELLATION CONFIRMATION */}
-      {/* ========================================================== */}
-      {cancelModalBooking && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm">
-          <div className="relative w-full max-w-md border border-white/15 bg-qc-charcoal p-6 space-y-4">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center bg-red-500/10 text-red-400 border border-red-500/30">
-                <AlertTriangle className="h-5 w-5" />
-              </div>
-              <div>
-                <h3 className="font-display text-xl text-qc-white">Cancel Booking</h3>
-                <p className="text-xs text-qc-muted">
-                  Release slot for {cancelModalBooking.customer?.name}
-                </p>
-              </div>
-            </div>
+            <p className="text-xs text-qc-muted">
+              Are you sure you want to cancel reservation{" "}
+              <strong className="text-qc-white">
+                {cancelModalBooking.readableId || cancelModalBooking.bookingId}
+              </strong>
+              ? The slot will immediately become AVAILABLE for other players.
+            </p>
 
             <div>
-              <label className="block text-xs uppercase tracking-wider text-qc-muted">
-                Reason for Cancellation
-              </label>
-              <select
+              <label className="block text-xs text-white/70 mb-1">Reason for cancellation:</label>
+              <input
+                type="text"
                 value={cancellationReason}
                 onChange={(e) => setCancellationReason(e.target.value)}
-                className="mt-1.5 w-full border border-white/15 bg-qc-panel px-3 py-2 text-xs text-qc-white focus:outline-none"
-              >
-                <option value="Player requested cancellation">Player requested cancellation</option>
-                <option value="Weather / Rain disruption">Weather / Rain disruption</option>
-                <option value="Maintenance / Turf repair">Maintenance / Turf repair</option>
-                <option value="Double booked">Double booked</option>
-                <option value="No-show">Player no-show</option>
-                <option value="Other">Other</option>
-              </select>
+                className="w-full border border-white/15 bg-qc-panel p-2 text-xs text-qc-white focus:border-qc-lime focus:outline-none"
+              />
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-3 border-t border-white/10">
-              <Button
-                variant="secondary"
-                size="sm"
+              <button
                 onClick={() => setCancelModalBooking(null)}
-                disabled={actionLoading}
+                className="px-3 py-1.5 text-xs text-white/60 hover:text-white"
               >
                 Keep Booking
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleCancelAction}
+              </button>
+              <button
+                onClick={handleConfirmCancellation}
                 disabled={actionLoading}
-                className="bg-red-500 text-white hover:bg-red-600 border-red-500"
+                className="border border-red-500/40 bg-red-500/20 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-red-300 hover:bg-red-500/30"
               >
-                {actionLoading ? "Cancelling..." : "Confirm Cancellation"}
-              </Button>
+                {actionLoading ? "Cancelling..." : "Yes, Cancel"}
+              </button>
             </div>
           </div>
         </div>
       )}
     </div>
-  );
-}
-
-// Section card component for grouped bookings
-function BookingSection({
-  title,
-  count,
-  items,
-  format12h,
-  onSelect,
-  isPast,
-}: {
-  title: string;
-  count: number;
-  items: OwnerBooking[];
-  format12h: (t: string) => string;
-  onSelect: (b: OwnerBooking) => void;
-  isPast?: boolean;
-}) {
-  return (
-    <section className="space-y-3">
-      <div className="flex items-center justify-between border-b border-white/8 pb-2">
-        <div className="flex items-center gap-2">
-          <span className="font-display text-xl text-qc-white">{title}</span>
-          <span className="border border-white/10 bg-qc-panel px-2 py-0.5 text-[10px] font-mono text-qc-muted">
-            {count}
-          </span>
-        </div>
-      </div>
-
-      <div className="space-y-2.5">
-        {items.map((b) => (
-          <div
-            key={b.bookingId}
-            onClick={() => onSelect(b)}
-            className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 border p-4 transition cursor-pointer ${
-              b.bookingStatus === "cancelled"
-                ? "border-red-500/20 bg-qc-panel/40 opacity-70"
-                : isPast
-                ? "border-white/5 bg-qc-panel/50"
-                : "border-white/10 bg-qc-panel hover:border-qc-lime/50 hover:bg-qc-panel/80"
-            }`}
-          >
-            {/* Left: Sport, Court, Time */}
-            <div className="flex items-start gap-3.5">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center border border-white/10 bg-qc-charcoal text-qc-lime font-display text-lg">
-                {b.sport?.name?.charAt(0) || "S"}
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="font-display text-xl text-qc-white capitalize">
-                    {b.sport?.name}
-                  </p>
-                  <span className="border border-white/10 bg-qc-charcoal px-2 py-0.5 text-[10px] text-white/70">
-                    {b.court?.name}
-                  </span>
-                </div>
-                <p className="mt-1 font-mono text-xs text-qc-lime">
-                  {format12h(b.startTime)} - {format12h(b.endTime)}
-                  <span className="text-qc-muted"> · {b.gameDate}</span>
-                </p>
-              </div>
-            </div>
-
-            {/* Middle: Customer Details */}
-            <div className="text-left sm:text-right">
-              <p className="text-sm font-medium text-qc-white">
-                {b.customer?.name}
-              </p>
-              <p className="font-mono text-xs text-qc-muted">
-                {b.customer?.phone} · {b.playerCount} players
-              </p>
-            </div>
-
-            {/* Right: Pricing & Status */}
-            <div className="flex items-center justify-between sm:justify-end gap-4 border-t sm:border-t-0 border-white/8 pt-2 sm:pt-0">
-              <div className="text-right">
-                <p className="font-display text-xl text-qc-white">
-                  {formatINR(b.pricing?.total || 0)}
-                </p>
-                <span
-                  className={`text-[10px] uppercase tracking-wider font-semibold ${
-                    b.bookingStatus === "confirmed"
-                      ? "text-qc-lime"
-                      : b.bookingStatus === "cancelled"
-                      ? "text-red-400"
-                      : "text-amber-400"
-                  }`}
-                >
-                  {b.bookingStatus}
-                </span>
-              </div>
-              <ChevronRight className="h-4 w-4 text-white/30" />
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }

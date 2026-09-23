@@ -26,23 +26,31 @@ import {
 } from "firebase/firestore";
 import { auth, db, googleProvider, isFirebaseConfigured } from "@/lib/firebase";
 import { getBusinessProfileByOwnerId } from "@/services/businessService";
-import type { OwnerUser, BusinessProfile } from "@/types";
+import { getPlayerProfile, updatePlayerProfile } from "@/services/playerService";
+import type { OwnerUser, BusinessProfile, UserRole, PlayerProfile } from "@/types";
 
 interface AuthContextType {
   user: User | null;
+  role: UserRole | null;
   ownerProfile: OwnerUser | null;
   businessProfile: BusinessProfile | null;
+  playerProfile: PlayerProfile | null;
   hasCompletedOnboarding: boolean;
   loading: boolean;
   loadingBusinessProfile: boolean;
+  loadingPlayerProfile: boolean;
   error: string | null;
   isConfigured: boolean;
   signInWithEmail: (email: string, pass: string) => Promise<void>;
   signUpWithEmail: (name: string, email: string, pass: string) => Promise<void>;
+  signUpPlayerWithEmail: (name: string, email: string, pass: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
+  signInPlayerWithGoogle: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshBusinessProfile: () => Promise<BusinessProfile | null>;
+  refreshPlayerProfile: () => Promise<PlayerProfile | null>;
+  updatePlayer: (data: Partial<PlayerProfile>) => Promise<void>;
   clearError: () => void;
 }
 
@@ -88,10 +96,13 @@ export function getFriendlyErrorMessage(err: unknown): string {
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [role, setRole] = useState<UserRole | null>(null);
   const [ownerProfile, setOwnerProfile] = useState<OwnerUser | null>(null);
   const [businessProfile, setBusinessProfile] = useState<BusinessProfile | null>(null);
+  const [playerProfile, setPlayerProfile] = useState<PlayerProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingBusinessProfile, setLoadingBusinessProfile] = useState(true);
+  const [loadingPlayerProfile, setLoadingPlayerProfile] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchBusinessProfile = useCallback(async (uid: string): Promise<BusinessProfile | null> => {
@@ -108,6 +119,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const fetchPlayerProfile = useCallback(async (uid: string): Promise<PlayerProfile | null> => {
+    setLoadingPlayerProfile(true);
+    try {
+      const profile = await getPlayerProfile(uid);
+      setPlayerProfile(profile);
+      return profile;
+    } catch (err) {
+      console.warn("Error checking player profile:", err);
+      return null;
+    } finally {
+      setLoadingPlayerProfile(false);
+    }
+  }, []);
+
   const refreshBusinessProfile = useCallback(async () => {
     if (!user) {
       setBusinessProfile(null);
@@ -116,11 +141,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return await fetchBusinessProfile(user.uid);
   }, [user, fetchBusinessProfile]);
 
+  const refreshPlayerProfile = useCallback(async () => {
+    if (!user) {
+      setPlayerProfile(null);
+      return null;
+    }
+    return await fetchPlayerProfile(user.uid);
+  }, [user, fetchPlayerProfile]);
+
   const syncUserDoc = useCallback(
     async (
       firebaseUser: User,
       authProvider: "password" | "google",
-      displayNameFallback?: string
+      displayNameFallback?: string,
+      intendedRole?: UserRole
     ) => {
       try {
         const userRef = doc(db, "users", firebaseUser.uid);
@@ -130,52 +164,66 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           displayNameFallback ||
           firebaseUser.displayName ||
           snapshot.data()?.name ||
-          "Facility Owner";
+          (intendedRole === "player" ? "Player" : "Facility Owner");
 
         const photo = firebaseUser.photoURL || snapshot.data()?.photoURL || "";
 
+        let userRole: UserRole = "owner";
         if (!snapshot.exists()) {
-          const newProfile: OwnerUser = {
+          userRole = intendedRole || "owner";
+          const newProfile: any = {
             uid: firebaseUser.uid,
             name,
             email: firebaseUser.email || "",
             photoURL: photo,
-            role: "owner",
+            role: userRole,
             authProvider,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           };
           await setDoc(userRef, newProfile);
-          setOwnerProfile(newProfile);
+          setRole(userRole);
+
+          if (userRole === "owner") {
+            setOwnerProfile(newProfile);
+            await fetchBusinessProfile(firebaseUser.uid);
+          } else if (userRole === "player") {
+            await updatePlayerProfile(firebaseUser.uid, {
+              name,
+              email: firebaseUser.email || "",
+              profileImage: photo,
+              favoriteSports: [],
+            });
+            await fetchPlayerProfile(firebaseUser.uid);
+          }
         } else {
           await updateDoc(userRef, {
             updatedAt: serverTimestamp(),
           });
           const data = snapshot.data();
-          setOwnerProfile({
-            uid: firebaseUser.uid,
-            name: data.name || name,
-            email: firebaseUser.email || data.email || "",
-            photoURL: data.photoURL || photo,
-            role: data.role || "owner",
-            authProvider: data.authProvider || authProvider,
-            createdAt: data.createdAt,
-            updatedAt: data.updatedAt,
-          });
+          userRole = (data.role as UserRole) || "owner";
+          setRole(userRole);
+          if (userRole === "owner") {
+            setOwnerProfile({
+              uid: firebaseUser.uid,
+              name: data.name || name,
+              email: firebaseUser.email || data.email || "",
+              photoURL: data.photoURL || photo,
+              role: userRole,
+              authProvider: data.authProvider || authProvider,
+              createdAt: data.createdAt,
+              updatedAt: data.updatedAt,
+            });
+            await fetchBusinessProfile(firebaseUser.uid);
+          } else if (userRole === "player") {
+            await fetchPlayerProfile(firebaseUser.uid);
+          }
         }
       } catch (firestoreError) {
         console.warn("Firestore user sync warning:", firestoreError);
-        setOwnerProfile({
-          uid: firebaseUser.uid,
-          name: displayNameFallback || firebaseUser.displayName || "Facility Owner",
-          email: firebaseUser.email || "",
-          photoURL: firebaseUser.photoURL || "",
-          role: "owner",
-          authProvider,
-        });
       }
     },
-    []
+    [fetchBusinessProfile, fetchPlayerProfile]
   );
 
   useEffect(() => {
@@ -186,24 +234,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const provider: "password" | "google" =
           providerId === "google.com" ? "google" : "password";
         await syncUserDoc(currentUser, provider);
-        await fetchBusinessProfile(currentUser.uid);
       } else {
+        setRole(null);
         setOwnerProfile(null);
         setBusinessProfile(null);
+        setPlayerProfile(null);
         setLoadingBusinessProfile(false);
+        setLoadingPlayerProfile(false);
       }
       setLoading(false);
     });
 
     return () => unsubscribe();
-  }, [syncUserDoc, fetchBusinessProfile]);
+  }, [syncUserDoc]);
 
   const signInWithEmail = async (email: string, pass: string) => {
     setError(null);
     try {
       const cred = await signInWithEmailAndPassword(auth, email.trim(), pass);
       await syncUserDoc(cred.user, "password");
-      await fetchBusinessProfile(cred.user.uid);
     } catch (err) {
       const friendly = getFriendlyErrorMessage(err);
       setError(friendly);
@@ -226,8 +275,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           // Non-blocking
         }
       }
-      await syncUserDoc(cred.user, "password", name.trim());
-      await fetchBusinessProfile(cred.user.uid);
+      await syncUserDoc(cred.user, "password", name.trim(), "owner");
+    } catch (err) {
+      const friendly = getFriendlyErrorMessage(err);
+      setError(friendly);
+      throw new Error(friendly);
+    }
+  };
+
+  const signUpPlayerWithEmail = async (
+    name: string,
+    email: string,
+    pass: string
+  ) => {
+    setError(null);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+      if (name.trim()) {
+        try {
+          await updateProfile(cred.user, { displayName: name.trim() });
+        } catch {
+          // Non-blocking
+        }
+      }
+      await syncUserDoc(cred.user, "password", name.trim(), "player");
     } catch (err) {
       const friendly = getFriendlyErrorMessage(err);
       setError(friendly);
@@ -240,11 +311,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const cred = await signInWithPopup(auth, googleProvider);
       await syncUserDoc(cred.user, "google");
-      await fetchBusinessProfile(cred.user.uid);
     } catch (err) {
       const friendly = getFriendlyErrorMessage(err);
       setError(friendly);
       throw new Error(friendly);
+    }
+  };
+
+  const signInPlayerWithGoogle = async () => {
+    setError(null);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      await syncUserDoc(cred.user, "google", undefined, "player");
+    } catch (err) {
+      const friendly = getFriendlyErrorMessage(err);
+      setError(friendly);
+      throw new Error(friendly);
+    }
+  };
+
+  const updatePlayer = async (data: Partial<PlayerProfile>) => {
+    if (!user) throw new Error("User must be authenticated to update player profile");
+    setError(null);
+    try {
+      await updatePlayerProfile(user.uid, data);
+      await fetchPlayerProfile(user.uid);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to update profile";
+      setError(msg);
+      throw new Error(msg);
     }
   };
 
@@ -263,8 +358,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     try {
       await signOut(auth);
+      setRole(null);
       setOwnerProfile(null);
       setBusinessProfile(null);
+      setPlayerProfile(null);
     } catch (err) {
       const friendly = getFriendlyErrorMessage(err);
       setError(friendly);
@@ -282,19 +379,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
+        role,
         ownerProfile,
         businessProfile,
+        playerProfile,
         hasCompletedOnboarding,
         loading,
         loadingBusinessProfile,
+        loadingPlayerProfile,
         error,
         isConfigured: isFirebaseConfigured,
         signInWithEmail,
         signUpWithEmail,
+        signUpPlayerWithEmail,
         signInWithGoogle,
+        signInPlayerWithGoogle,
         resetPassword,
         logout,
         refreshBusinessProfile,
+        refreshPlayerProfile,
+        updatePlayer,
         clearError,
       }}
     >
@@ -310,3 +414,4 @@ export function useAuth() {
   }
   return context;
 }
+

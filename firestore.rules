@@ -18,6 +18,19 @@ service cloud.firestore {
       allow read, write: if isOwner(userId);
     }
 
+    // Players collection (Player Profiles & Favorites):
+    // - Authenticated player can read and write only their own player profile
+    // - Authenticated player can manage only their own favorites subcollection
+    match /players/{playerId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == playerId;
+
+      match /favorites/{favoriteId} {
+        allow read, write: if isAuthenticated() && request.auth.uid == playerId;
+      }
+    }
+
+
+
     // Businesses collection (prepared architecture):
     // - Anyone can read business public details (for public player discovery)
     // - Only the business owner can create or update their business document
@@ -29,21 +42,58 @@ service cloud.firestore {
 
     // Bookings collection (Owner & Customer booking records):
     // - Authenticated owner can read and manage bookings belonging to their venues (ownerId == request.auth.uid)
-    // - Customer can create booking or read their own booking
+    // - Player can read, create, and cancel/update their own booking
     match /bookings/{bookingId} {
       allow read: if isAuthenticated() && (
         resource.data.ownerId == request.auth.uid ||
+        resource.data.playerId == request.auth.uid ||
         resource.data.customer.userId == request.auth.uid
       );
       allow create: if isAuthenticated() && (
         request.resource.data.ownerId == request.auth.uid ||
+        request.resource.data.playerId == request.auth.uid ||
         request.resource.data.customer.userId == request.auth.uid
       );
       allow update: if isAuthenticated() && (
         resource.data.ownerId == request.auth.uid ||
+        resource.data.playerId == request.auth.uid ||
         resource.data.customer.userId == request.auth.uid
       );
       allow delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Slot Locks collection (Atomic Double-Booking Prevention & Live Public Availability):
+    // - Anyone can read slot locks to inspect real-time availability without exposing private booking data
+    // - Authenticated users can create a lock if playerId matches their uid or ownerId matches their uid
+    // - Only the locking player or venue owner can update or delete (release) the lock
+    match /slot_locks/{lockId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && (
+        request.resource.data.playerId == request.auth.uid ||
+        request.resource.data.ownerId == request.auth.uid
+      );
+      allow update, delete: if isAuthenticated() && (
+        resource.data.playerId == request.auth.uid ||
+        resource.data.ownerId == request.auth.uid
+      );
+    }
+
+    // Blocked Slots collection:
+    // - Anyone can read blocked slots to inspect court availability
+    // - Only the venue owner can create, update, or delete blocked slots for their venues
+    match /blocked_slots/{blockId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // Customers collection (Player CRM records):
+    // - Authenticated owner can read and manage customer profiles belonging to their venues (ownerId == request.auth.uid)
+    match /customers/{customerId} {
+      allow read, write: if isAuthenticated() && (
+        resource.data.ownerId == request.auth.uid ||
+        request.resource.data.ownerId == request.auth.uid
+      );
     }
 
     // Default deny all other collections

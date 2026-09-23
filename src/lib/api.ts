@@ -4,7 +4,6 @@
  */
 
 import {
-  adminMetrics,
   bookings,
   demandOpportunities,
   facilities,
@@ -80,10 +79,7 @@ export async function fetchSubscription(): Promise<Subscription> {
   return subscription;
 }
 
-export async function fetchAdminMetrics() {
-  await delay();
-  return adminMetrics;
-}
+
 
 export async function submitDemandPool(payload: unknown) {
   await delay(600);

@@ -44,8 +44,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} h-full`}>
-      <body className="min-h-full bg-qc-black text-qc-white antialiased">
+    <html
+      lang="en"
+      className={`${display.variable} ${body.variable} h-full`}
+      suppressHydrationWarning
+    >
+      <body
+        className="min-h-full bg-qc-black text-qc-white antialiased"
+        suppressHydrationWarning
+      >
         {children}
       </body>
     </html>

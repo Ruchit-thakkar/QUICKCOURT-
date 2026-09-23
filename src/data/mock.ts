@@ -1,5 +1,4 @@
 import type {
-  AdminMetrics,
   Booking,
   ChartPoint,
   Court,
@@ -429,15 +428,6 @@ export const subscription: Subscription = {
   status: "ACTIVE",
   priceMonthly: 1999,
   expiresInDays: 23,
-};
-
-export const adminMetrics: AdminMetrics = {
-  totalPlayers: 12840,
-  totalFacilities: 186,
-  activeGames: 412,
-  bookings: 2890,
-  platformRevenue: 1842000,
-  activeSubscriptions: 142,
 };
 
 export const flowSteps = [
